@@ -2,7 +2,8 @@
 
 ## 1. Environment Setup
 
-This entry uses only Python standard-library modules. No network access, package installation, build step, or manual interaction is required.
+This entry uses the bundled Python implementation under `work/specdiff`. No package installation, build step,
+or manual interaction is required for the default CLI path.
 
 Required runtime:
 
@@ -18,8 +19,6 @@ Optional self-check:
 python3 self_check.py
 ```
 
-The self-check runs the detector against a tiny bundled fixture and validates that JSON output contains evidence-backed issues. It is not required for judging the benchmark.
-
 ## 2. Execution Flow
 
 Run the detector from the submitted `work/` directory:
@@ -34,18 +33,19 @@ python3 -m specdiff \
 
 Input parameters:
 
-- `--repo`: local git repository path for the implementation under review.
-- `--docs`: design document path. This may be a single Markdown/text file or a directory containing Markdown/text files.
+- `--repo`: local repository path for the implementation under review.
+- `--docs`: design/specification document. It may contain explicit obligations or an RFC inventory.
 - `--out`: JSON result file path.
 - `--report`: optional Markdown report path.
 
-The benchmark repository is expected to be the F-Stack repository at commit `58cc9cf685f496d0542b072fe3e6246d3ceba781` on branch `competition`, but the tool does not require the branch name to run.
+When `--docs` is an RFC inventory, SpecDiff treats the RFC text as a specification corpus, builds bounded
+Requirement Packs, and audits those packs. RFC manifest rows are not treated as implementation requirements.
 
 ## 3. Completion Criteria
 
-Execution is complete when the command exits. A successful run exits with code `0` and writes the JSON result file specified by `--out`.
-
-If the repository or document path is missing, the command exits non-zero with an error message.
+Execution is complete when the command exits. A successful run exits with code `0` and writes the JSON result
+file specified by `--out`. Invalid input paths or unreadable documents cause a non-zero exit with an error
+message.
 
 ## 4. Result Retrieval
 
@@ -61,52 +61,16 @@ The optional human-readable report is:
 /app/code/judge-assets/01_03_ai_implementation_design_difference_detection/work/result/report.md
 ```
 
-The JSON result has this shape:
-
-```json
-{
-  "tool": "specdiff",
-  "issues": [
-    {
-      "id": "ISSUE-001",
-      "title": "Implementation limits Neighbor Discovery options",
-      "match_type": "code_weaker_than_spec",
-      "severity": "HIGH",
-      "confidence": 0.91,
-      "description": "...",
-      "spec_evidence": {
-        "document": "RFC 4861",
-        "section": "6.3.4 / 4.6.2",
-        "quote": "..."
-      },
-      "code_evidence": {
-        "file": "freebsd/netinet6/nd6.c",
-        "line": 105,
-        "quote": "..."
-      },
-      "verification": [
-        "..."
-      ]
-    }
-  ]
-}
-```
-
-Each issue includes:
-
-- inconsistency description
-- design/spec evidence
-- code evidence with file path and line number when available
-- match type
-- severity and confidence
-- verification notes suitable for automatic or manual review
+Each issue includes specification evidence, code evidence when available, match type, severity, confidence, and
+verification notes.
 
 ## 5. Included Skill
 
-The entry also includes a Codex/Claude-style skill at:
+The entry also includes an OpenCode skill at:
 
 ```text
 work/skills/spec-code-consistency/SKILL.md
 ```
 
-The CLI is the authoritative execution path for automatic judging. The skill documents the audit workflow and can be used by an agent to extend or manually validate findings.
+The CLI is the authoritative execution path for automatic judging. The OpenCode skill documents the controlled
+agent workflow for interactive use.

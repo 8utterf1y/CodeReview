@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
-from .models import Finding
+from .models import CoverageRecord, Finding
 
 
 def write_json(path: Path, payload: Dict[str, object]) -> None:
@@ -12,7 +12,7 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_markdown(path: Path, findings: List[Finding]) -> None:
+def write_markdown(path: Path, findings: List[Finding], coverage: Sequence[CoverageRecord] = ()) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# SpecDiff Report",
@@ -20,6 +20,27 @@ def write_markdown(path: Path, findings: List[Finding]) -> None:
         f"Detected issues: {len(findings)}",
         "",
     ]
+    if coverage:
+        coverage_counts: Dict[str, int] = {}
+        for record in coverage:
+            coverage_counts[record.status] = coverage_counts.get(record.status, 0) + 1
+        lines.extend(
+            [
+                f"Requirements reviewed: {len(coverage)}",
+                f"Coverage status counts: {coverage_counts}",
+                "",
+                "## Coverage Matrix",
+                "",
+                "| Requirement | Rule Family | Status | Strength | Risk | Evidence |",
+                "|---|---|---:|---:|---:|---|",
+            ]
+        )
+        for record in coverage:
+            evidence = record.positive_evidence[0].quote if record.positive_evidence else "; ".join(record.missing_evidence_searches[:1])
+            lines.append(
+                f"| {record.requirement.id} | {record.rule_family} | {record.status} | {record.evidence_strength} | {record.coverage_risk} | {evidence[:120]} |"
+            )
+        lines.extend(["", "## Issues", ""])
     for finding in findings:
         lines.extend(
             [

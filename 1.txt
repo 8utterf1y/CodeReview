@@ -1,0 +1,185 @@
+## 题目3参赛完整清单
+
+---
+
+## 一、题目要求总览
+
+| 项目 | 要求 |
+|------|------|
+| **题目名称** | 识别代码实现和设计文档中的不一致问题 |
+| **核心目标** | 构建智能一致性检视系统，自动检测代码与RFC协议规范的差异 |
+| **验收标准** | 正确识别≥4个issues，误报率≤50%，检视时长≤6小时 |
+| **评优标准** | issues数量越多越好，误报率越低越好，时长越短越好 |
+
+---
+
+## 二、已有资源（可直接使用）
+
+### 1. 代码仓库
+```
+code/f-stack/           # F-Stack v1.25 代码
+├── freebsd/netinet6/   # IPv6协议实现 (nd6.c, nd6_nbr.c)
+├── dpdk/lib/ip_frag/   # IP分片处理 (rte_ip_frag.h)
+└── lib/ff_dpdk_if.c    # DPDK接口层 (MLD问题所在)
+```
+
+### 2. 设计文档
+```
+Difference/benchmark.md          # 参考RFC清单
+Difference/issues/00-summary.md  # 6个已知issues清单
+Difference/issues/01-nd-option-limit.md
+Difference/issues/02-proxy-na-no-random-delay.md
+Difference/issues/03-proxy-na-no-unsolicited.md
+Difference/issues/04-fragment-header-chain-walking.md
+Difference/issues/05-absent-dhcpv6.md
+Difference/issues/06-mld-multicast-reception.md
+```
+
+### 3. 关键RFC文档（需下载）
+| RFC | 主题 | 章节 |
+|-----|------|------|
+| RFC 2119 | MUST/SHOULD/MAY关键字定义 | 全文 |
+| RFC 4861 | Neighbor Discovery for IPv6 | §6.3.4, §7.2.6, §7.2.8, §4.6.2 |
+| RFC 8200 | IPv6 Specification | §4, §4.5 |
+| RFC 8415 | DHCPv6 | 全文 |
+| RFC 2710 | MLD | 全文 |
+
+---
+
+## 三、技术知识储备
+
+### 1. RFC规范关键知识
+
+#### MUST/SHOULD/MAY含义
+| 关键词 | 含义 | 违规级别 |
+|--------|------|----------|
+| **MUST** | 绝对要求 | 严重 |
+| **MUST NOT** | 禁止 | 严重 |
+| **SHOULD** | 推荐，但有理由可忽略 | 中等 |
+| **SHOULD NOT** | 不推荐，但有理由可做 | 中等 |
+| **MAY** | 可选 | 轻微 |
+
+#### RFC结构定位
+- Section 4/6/7 = 协议帧格式和处理规则
+- Normative text = 必须遵守的规范（MUST/SHOULD/MAY标识）
+- Section 10 = 常量定义（如MAX_ANYCAST_DELAY_TIME）
+
+### 2. C代码分析要点
+
+#### 关键代码模式
+```c
+// 硬编码限制
+VNET_DEFINE_STATIC(int, nd6_maxndopt) = 10;
+
+// 条件判断
+if (i > V_nd6_maxndopt) { ... }
+
+// 循环遍历
+for (; limit > 0; limit -= optlen) { ... }
+
+// 缺失功能
+// TODO: 应该实现但未实现的部分
+```
+
+#### 6个Issues代码位置
+| Issue | 文件 | 行号 | 问题本质 |
+|-------|------|------|----------|
+| ND option limit | `freebsd/netinet6/nd6.c` | 105, 508 | `nd6_maxndopt = 10` |
+| Proxy NA no delay | `freebsd/netinet6/nd6_nbr.c` | 650-651, 967-968 | 无随机延迟 |
+| Proxy NA no unsolicited | `freebsd/netinet6/nd6_nbr.c` | - | 缺失unsolicited NA |
+| Fragment chain | `dpdk/lib/ip_frag/rte_ip_frag.h` | 142-150 | 只检查第一个header |
+| No DHCPv6 | 整个模块 | - | 功能完全缺失 |
+| MLD misrouted | `lib/ff_dpdk_if.c` | - | 路由错误 |
+
+---
+
+## 四、需要构建的技能/工具
+
+需要你来设计
+---
+
+## 五、交付件清单
+
+### 1. 工具形式（至少一种）
+```
+✓ CLI工具
+✓ Web服务
+✓ Agent/Skill
+✓ Extension
+✓ MCP Server
+```
+
+### 2. 技术文档
+```
+INSTRUCTION.md                    # 必选：工具部署使用说明
+技术报告.md                       # 必选：技术方案
+├── 技术方案
+├── 工具部署及使用手册
+└── 基准测试效果验证
+```
+
+### 3. 输出格式
+```json
+{
+  "issues": [
+    {
+      "id": "ISSUE-001",
+      "title": "ND 10-Option Limit",
+      "rfc_reference": "RFC 4861 §6.3.4",
+      "violation_level": "MUST",
+      "file": "freebsd/netinet6/nd6.c",
+      "line": 105,
+      "evidence": {
+        "code_snippet": "VNET_DEFINE_STATIC(int, nd6_maxndopt) = 10;",
+        "rfc_requirement": "A host MUST process all valid Prefix Information options"
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 六、验收检查清单
+
+| 检查项 | 要求 | 状态 |
+|--------|------|------|
+| 识别≥4个issues | 已知6个 | ⬜ |
+| 误报率≤50% | 允许50%误报 | ⬜ |
+| 检视时长≤6小时 | 自动化无人值守 | ⬜ |
+| 证据链完整 | RFC + 代码 | ⬜ |
+| 工具可部署 | 输入代码+文档，输出报告 | ⬜ |
+
+---
+
+## 七、学习资源
+
+
+### 2. F-Stack代码
+```bash
+# 克隆仓库
+git clone https://github.com/F-Stack/f-stack
+cd f-stack
+git checkout -b competition 58cc9cf685f496d0542b072fe3e6246d3ceba781
+```
+
+### 3. RFC获取
+```
+RFC 4861: https://www.rfc-editor.org/rfc/rfc4861
+RFC 8200: https://www.rfc-editor.org/rfc/rfc8200
+RFC 8415: https://www.rfc-editor.org/rfc/rfc8415
+RFC 2710: https://www.rfc-editor.org/rfc/rfc2710
+RFC 2119: https://www.rfc-editor.org/rfc/rfc2119
+```
+
+---
+
+
+## 九、关键成功因素
+
+1. **检测准确性** - 证据链必须充分
+2. **泛化能力** - 能处理新的RFC和代码
+3. **自动化程度** - 完全无人值守
+4. **报告质量** - 清晰的问题描述和修复建议
+
+---
