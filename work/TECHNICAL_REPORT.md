@@ -2,162 +2,78 @@
 
 ## 1. Goal
 
-SpecDiff detects inconsistencies between a code implementation and design/RFC documents. It is designed for the implementation/design difference detection competition, where the judge supplies a local code repository and a design document path, then reads a structured result file.
+SpecDiff audits whether a repository implementation is consistent with design documents or RFC-based
+specifications. The primary execution path is the OpenCode skill/tool workflow, not the legacy scanner CLI.
 
-## 2. Chosen Base
-
-The design is based on the open-source Trail of Bits `spec-to-code-compliance` workflow:
-
-- Spec-IR: structured requirements extracted from specifications.
-- Code-IR: implementation behavior extracted from source files.
-- Alignment-IR: matching requirements to implementation evidence.
-- Divergence findings: actionable mismatches with evidence chains.
-
-SpecDiff adapts that audit pattern for RFC-driven C/network-stack code and changes the execution model into a deterministic CLI so the judge can run it without human interaction.
-
-Additional ideas borrowed from related tools:
-
-- ClaudeCodeAgents/Jenny: every finding needs spec evidence, code evidence, line references, and severity.
-- PR-Agent: structured machine-readable output and compact context selection.
-- code-review skills: separate specification compliance from confidence/noise filtering.
-
-## 3. Architecture
+## 2. Main Workflow
 
 ```text
-design documents / RFC references
-  -> Spec-IR requirement extraction
-  -> source-file indexing
-  -> targeted protocol compliance checkers
-  -> finding de-duplication and ranking
-  -> issues.json + report.md
+repo + docs + out
+  -> audit_start
+  -> explicit requirements or RFC corpus
+  -> Requirement Pack Builder
+  -> Code Facts SQLite index
+  -> audit_next
+  -> Code Investigator
+  -> submit_investigation
+  -> Evidence Reviewer only for mismatch candidates
+  -> audit_finish
+  -> issues.json + SARIF
 ```
 
-The current implementation is dependency-free Python:
+The program controls state, evidence IDs, schema validation, mismatch gates, and final assembly. Agents only
+investigate the bounded Requirement Pack they receive and submit typed results through tools.
 
-- `spec_loader.py`: reads Markdown/text specs and extracts normative requirements. It also includes RFC-oriented fallback requirements for RFC 4861, RFC 8200, RFC 8415, and RFC 2710 when the benchmark document references those RFCs but does not include full text.
-- `code_index.py`: recursively indexes source files and provides regex search with relative file paths and line numbers.
-- `checkers.py`: targeted checkers for the benchmark issue families.
-- `report.py`: writes machine-readable JSON and human-readable Markdown.
-- `cli.py`: command-line entry point.
+## 3. RFC Handling
 
-## 4. Implemented Checkers
+An RFC inventory is treated as scope, not as direct implementation requirements. SpecDiff resolves referenced
+RFC text, stores a corpus of clauses, computes effective scope such as `effective`, `overlay`,
+`historical_context`, or `meta_spec`, and builds bounded Requirement Packs from normative behavior seeds plus
+limited document context.
 
-1. Neighbor Discovery option limit:
-   - Finds `nd6_maxndopt`/`maxndopt` style hard limits in `nd6.c`.
-   - Reports code weaker than RFC-style processing of valid ND options.
+Every corpus clause receives a disposition such as `pack_seed`, `pack_context`, `definition_context`,
+`historical_context`, `meta_spec`, `informational`, or `unclassified`. This prevents silent dropping of RFC
+content while avoiding one audit task per RFC paragraph.
 
-2. Proxy Neighbor Advertisement random delay:
-   - Reads `freebsd/netinet6/nd6_nbr.c`.
-   - Checks whether proxy NA handling has nearby random/timer/delay logic.
+## 4. Code Facts
 
-3. Proxy unsolicited Neighbor Advertisement:
-   - Checks whether proxy handling exists but no unsolicited/all-nodes update path is evident.
+The OpenCode path builds `.specdiff/audit/code-index/codefacts.sqlite` with:
 
-4. IPv6 Fragment extension-header chain walking:
-   - Reads `dpdk/lib/ip_frag/rte_ip_frag.h`.
-   - Checks for direct Fragment/Next Header logic without a loop over extension headers.
+- files, languages, components, source roles, and build files
+- symbols and references from bundled Aider Tree-sitter `tags.scm`
+- candidate calls with `resolution` and `confidence`
+- repo-map ranking from reference relationships
+- tool coverage records
 
-5. DHCPv6 absence:
-   - Performs repository-wide symbol search for DHCPv6 implementation surface.
-   - Reports missing protocol capability when only absent or trivial hits are found.
+Current fallback is intentionally simple: if Tree-sitter/Aider tags are unavailable, semantic symbol/reference
+coverage is reported as unavailable or partial, and `code_search` text mode remains available as navigation
+only. There is no ctags, CodeQL, Joern, SCIP, or Semgrep backend in the current main path.
 
-6. MLD multicast receive/dispatch:
-   - Reads `lib/ff_dpdk_if.c`.
-   - Checks whether IPv6 receive logic has clear MLD/ICMPv6 multicast dispatch.
+## 5. Mismatch Gate
 
-## 5. Output Schema
+Before a mismatch can reach the lightweight Reviewer, `submit_investigation` enforces structured evidence and
+minimum negative checks. Missing-capability claims require checks for symbol/file search, alternative naming,
+build/configuration, and responsibility. Behavior mismatch claims require an alternative-implementation check.
 
-The JSON output contains:
+The Reviewer does not search the repository. It only checks whether the supplied spec evidence, code evidence,
+and reasoning support the mismatch. Only accepted mismatch or partial findings are assembled into final issues.
 
-- `tool`, `version`, `repo`, `docs`
-- `requirements_indexed`
-- `source_files_indexed`
-- `issues`
+## 6. Validation
 
-Each issue contains:
+Synthetic tests cover:
 
-- `id`
-- `title`
-- `match_type`
-- `severity`
-- `confidence`
-- `description`
-- `spec_evidence`
-- `code_evidence`
-- `verification`
+- reference inventories are not direct requirements
+- RFC2119 does not become a product implementation task
+- obsolete RFCs do not duplicate effective RFC packs
+- cross-section context is preserved in bounded packs
+- missing capabilities still produce distributable packs
+- every corpus clause has a disposition
+- pack IDs and membership are deterministic
+- code search returns coverage context
+- heuristic calls are marked as heuristic/probable
 
-This matches the competition requirement that each issue provide the inconsistency description, design evidence, code evidence, code location, and design-document location.
-
-## 6. Baseline Validation
-
-A local smoke-test fixture is included under `work/testdata/`. The command below validates that the CLI exits successfully and writes both outputs:
+Run tests from the repository root:
 
 ```bash
-cd work
-python3 self_check.py
+PYTHONPATH=work PYTHONPYCACHEPREFIX=/private/tmp/specdiff-pyc python3 -m unittest discover -s work/tests
 ```
-
-On the local fixture, the tool reports six issue families and produces valid JSON.
-
-The expanded command used by the self-check is:
-
-```bash
-python3 -m specdiff \
-  --repo testdata/repo \
-  --docs testdata/docs/benchmark.md \
-  --out /tmp/specdiff-self-check/issues.json \
-  --report /tmp/specdiff-self-check/report.md
-```
-
-The detector was also run against the provided F-Stack benchmark checkout:
-
-```bash
-git -C testdata/f-stack rev-parse HEAD
-# 58cc9cf685f496d0542b072fe3e6246d3ceba781
-
-git -C testdata/f-stack branch --show-current
-# competition
-
-python3 -m specdiff \
-  --repo testdata/f-stack \
-  --docs testdata/docs/benchmark.md \
-  --out /tmp/specdiff-real/issues.json \
-  --report /tmp/specdiff-real/report.md
-```
-
-Observed result on this checkout:
-
-- Indexed source files: 13005
-- Detected issues: 6
-- Runtime: about 10 seconds on the local machine
-
-The six detected issue families were:
-
-- Proxy Neighbor Advertisement delay rule explicitly not implemented: `freebsd/netinet6/nd6_nbr.c:650`
-- Neighbor Discovery option processing capped by `nd6_maxndopt = 10`: `freebsd/netinet6/nd6.c:123`
-- IPv6 fragment helper checks only the extension header after the fixed IPv6 header: `dpdk/lib/ip_frag/rte_ip_frag.h:133`
-- Proxy Neighbor Advertisement lacks an explicit unsolicited/proactive proxy NA path: `freebsd/netinet6/nd6_nbr.c:340`
-- DHCPv6 implementation entry points absent: repository-wide scan
-- MLD multicast packets are routed through multicast/KNI filtering without explicit MLD dispatch: `lib/ff_dpdk_if.c:1567`
-
-## 7. Expected Competition Behavior
-
-For the provided F-Stack benchmark, the implemented checkers identify the six known issue families listed in the competition materials:
-
-- ND option limit
-- Proxy NA without random delay
-- Proxy NA without unsolicited advertisement support
-- Fragment header chain walking
-- Absent DHCPv6
-- MLD multicast reception/dispatch
-
-The tool exceeds the minimum threshold of four issues on the checked-out benchmark copy.
-
-## 8. Future Optimizations
-
-The next improvements should be:
-
-- Add optional RFC downloading and caching when network is available.
-- Add tree-sitter or clang-based function extraction for more accurate Code-IR.
-- Add an optional LLM verifier that consumes only candidate evidence and emits the same JSON schema.
-- Add more generic checkers for constants, timers, state-machine transitions, packet field validation, and missing protocol modules.

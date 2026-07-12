@@ -76,7 +76,7 @@ Final output must be machine-readable JSON:
       "negative_evidence": [
         "Searches or counter-evidence checked."
       ],
-      "searched_with": ["text-index", "symbol-lite", "ast-grep", "semgrep", "codeql", "joern"],
+      "searched_with": ["ripgrep-text", "aider-tree-sitter-tags", "sqlite-codefacts"],
       "notes": ["Why this status is justified."]
     }
   ],
