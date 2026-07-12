@@ -86,7 +86,21 @@ def next_action(workspace: Path) -> Dict[str, Any]:
     requirements = {item["id"]: item for item in _load_json(workspace / "requirements.json")["requirements"]}
     for req_id, item in state["requirements"].items():
         if item["investigation"] == "pending":
-            return {"next_action": "investigate", "requirement_pack": requirements[req_id], "requirement": requirements[req_id]}
+            requirement = requirements[req_id]
+            return {
+                "next_action": "investigate",
+                "requirement_pack": requirement,
+                "requirement": requirement,
+                "code_hints": _code_hints_for_requirement(workspace, requirement),
+                "worksheet": [
+                    "STEP 1 explain the pack in repository terms",
+                    "STEP 2 frame 1 to 3 implementation obligations",
+                    "STEP 3 locate candidate code",
+                    "STEP 4 inspect actual behavior",
+                    "STEP 5 search alternatives or bypass paths",
+                    "STEP 6 submit one conclusion",
+                ],
+            }
     for req_id, item in state["requirements"].items():
         if item["verification"] == "pending" and item["investigation"] == "submitted":
             return {"next_action": "review", "review_packet": review_bundle(workspace, req_id)}
@@ -138,14 +152,18 @@ def submit_simple_investigation(workspace: Path, payload_path: Path) -> Dict[str
             }
             _validate_issue(issue)
         negative_checks = payload.get("negative_checks") or []
+        obligations = payload.get("obligations") or []
+        findings = payload.get("findings") or []
         if conclusion == "mismatch":
             _validate_negative_checks(req_id, workspace, negative_checks, mismatch_kind)
+            _validate_obligation_findings(workspace, req_id, obligations, findings)
         canonical = {
             "requirement_id": req_id, "proposed_status": proposed_status, "reasoning": summary,
             "query_ids": query_ids, "evidence_ids": evidence_ids, "counterexample_query_ids": [],
             "claim_scope": "absence" if mismatch_kind == "missing" else "behavior_path",
             "unresolved_questions": payload.get("uncertainties") or [], "issue": issue,
-            "agent_conclusion": conclusion, "negative_checks": negative_checks, "submitted_at": _now(),
+            "agent_conclusion": conclusion, "negative_checks": negative_checks,
+            "obligations": obligations, "findings": findings, "submitted_at": _now(),
         }
         _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
         state["requirements"][req_id]["investigation"] = "submitted"
@@ -169,6 +187,8 @@ def review_bundle(workspace: Path, requirement_id: str) -> Dict[str, Any]:
         "claim": {
             "conclusion": investigation.get("agent_conclusion"), "status": investigation["proposed_status"],
             "summary": investigation["reasoning"], "issue": investigation.get("issue"),
+            "obligations": investigation.get("obligations") or [],
+            "findings": investigation.get("findings") or [],
         },
         "evidence": evidence,
         "search_summary": {
@@ -622,6 +642,50 @@ def _validate_negative_checks(req_id: str, workspace: Path, checks: Any, mismatc
             raise ValueError("negative_checks status must be searched, not_applicable, or inconclusive")
 
 
+def _validate_obligation_findings(workspace: Path, req_id: str, obligations: Any, findings: Any) -> None:
+    if not isinstance(obligations, list) or not obligations:
+        raise ValueError("mismatch investigation requires non-empty obligations")
+    if not isinstance(findings, list) or not findings:
+        raise ValueError("mismatch investigation requires non-empty findings")
+    requirement = next(item for item in _load_json(workspace / "requirements.json")["requirements"] if item["id"] == req_id)
+    pack_clause_ids = set(requirement.get("clause_ids") or [])
+    obligation_ids = set()
+    evidence_map = _jsonl_map(workspace / "evidence.jsonl", "evidence_id")
+    for obligation in obligations:
+        if not isinstance(obligation, dict):
+            raise ValueError("obligations entries must be objects")
+        obligation_id = str(obligation.get("id") or "").strip()
+        if not obligation_id:
+            raise ValueError("obligations require id")
+        if obligation_id in obligation_ids:
+            raise ValueError(f"duplicate obligation id: {obligation_id}")
+        obligation_ids.add(obligation_id)
+        description = str(obligation.get("description") or "").strip()
+        if not description:
+            raise ValueError(f"{obligation_id}: obligation description is required")
+        source_clause_ids = obligation.get("source_clause_ids") or []
+        if not isinstance(source_clause_ids, list) or not source_clause_ids:
+            raise ValueError(f"{obligation_id}: source_clause_ids are required")
+        if pack_clause_ids and not set(source_clause_ids).issubset(pack_clause_ids):
+            raise ValueError(f"{obligation_id}: source_clause_ids must belong to the current requirement pack")
+    for finding in findings:
+        if not isinstance(finding, dict):
+            raise ValueError("findings entries must be objects")
+        obligation_id = str(finding.get("obligation_id") or "").strip()
+        if obligation_id not in obligation_ids:
+            raise ValueError(f"finding references unknown obligation_id: {obligation_id}")
+        status = finding.get("status")
+        if status not in {"supported", "contradicted", "partial", "not_found"}:
+            raise ValueError("findings status must be supported, contradicted, partial, or not_found")
+        evidence_ids = finding.get("evidence_ids") or []
+        if status in {"contradicted", "partial"} and not evidence_ids:
+            raise ValueError(f"{obligation_id}: contradicted or partial findings require evidence_ids")
+        for evidence_id in evidence_ids:
+            item = evidence_map.get(evidence_id)
+            if not item or item["requirement_id"] != req_id:
+                raise ValueError(f"{obligation_id}: invalid evidence reference {evidence_id}")
+
+
 def _persist_spec_artifacts(workspace: Path, payload: Dict[str, Any]) -> None:
     if payload.get("artifact_type") != "rfc_corpus":
         return
@@ -672,6 +736,52 @@ def _coverage_context(workspace: Path, repo: Path) -> Dict[str, Any]:
     finally:
         connection.close()
     return coverage
+
+
+def _code_hints_for_requirement(workspace: Path, requirement: Dict[str, Any], *, symbol_limit: int = 10, component_limit: int = 5) -> Dict[str, Any]:
+    db_path = workspace / "code-index" / "codefacts.sqlite"
+    if not db_path.exists():
+        return {"components": [], "symbols": [], "source": "unavailable"}
+    terms = _hint_terms(requirement)
+    if not terms:
+        return {"components": [], "symbols": [], "source": "sqlite_codefacts"}
+    connection = sqlite3.connect(str(db_path))
+    connection.row_factory = sqlite3.Row
+    try:
+        symbol_scores: Counter[str] = Counter()
+        component_scores: Counter[str] = Counter()
+        for term in terms[:6]:
+            pattern = f"%{term.lower()}%"
+            for row in connection.execute(
+                "SELECT name FROM symbols WHERE lower(name) LIKE ? LIMIT 20",
+                (pattern,),
+            ).fetchall():
+                symbol_scores[row["name"]] += 1
+            for row in connection.execute(
+                "SELECT component FROM files WHERE lower(path) LIKE ? OR lower(component) LIKE ? LIMIT 20",
+                (pattern, pattern),
+            ).fetchall():
+                component_scores[row["component"]] += 1
+        return {
+            "components": [name for name, _score in component_scores.most_common(component_limit)],
+            "symbols": [name for name, _score in symbol_scores.most_common(symbol_limit)],
+            "source": "sqlite_codefacts",
+        }
+    finally:
+        connection.close()
+
+
+def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
+    text = " ".join(
+        str(requirement.get(field) or "")
+        for field in ("document", "section", "quote", "normalized", "capability")
+    )
+    terms = list(requirement.get("keywords") or [])
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower()):
+        if term not in terms:
+            terms.append(term)
+    stop = {"rfc", "must", "should", "shall", "not", "for", "the", "and", "all", "section"}
+    return [term for term in terms if term not in stop][:20]
 
 
 def _pack_coverage(workspace: Path, records: List[Dict[str, Any]], verifications: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:

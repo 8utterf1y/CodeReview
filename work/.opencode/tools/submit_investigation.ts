@@ -15,6 +15,16 @@ export default tool({
     summary: tool.schema.string().min(1),
     evidenceIds: tool.schema.array(tool.schema.string()),
     uncertainties: tool.schema.array(tool.schema.string()),
+    obligations: tool.schema.array(tool.schema.object({
+      id: tool.schema.string(),
+      description: tool.schema.string(),
+      sourceClauseIds: tool.schema.array(tool.schema.string()),
+    })).optional(),
+    findings: tool.schema.array(tool.schema.object({
+      obligationId: tool.schema.string(),
+      status: tool.schema.enum(["supported", "contradicted", "partial", "not_found"]),
+      evidenceIds: tool.schema.array(tool.schema.string()),
+    })).optional(),
     negativeChecks: tool.schema.array(tool.schema.object({
       dimension: tool.schema.string(),
       status: tool.schema.enum(["searched", "not_applicable", "inconclusive"]),
@@ -29,6 +39,16 @@ export default tool({
     const payload = {
       requirement_id: args.requirementId, conclusion: args.conclusion, summary: args.summary,
       evidence_ids: args.evidenceIds, uncertainties: args.uncertainties,
+      obligations: (args.obligations || []).map((item) => ({
+        id: item.id,
+        description: item.description,
+        source_clause_ids: item.sourceClauseIds,
+      })),
+      findings: (args.findings || []).map((item) => ({
+        obligation_id: item.obligationId,
+        status: item.status,
+        evidence_ids: item.evidenceIds,
+      })),
       negative_checks: args.negativeChecks || [],
       mismatch_kind: args.mismatchKind, title: args.title, severity: args.severity,
       confidence: args.confidence,

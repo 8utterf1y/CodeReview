@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -12,6 +15,11 @@ from .rfc_packs import build_requirement_pack_artifact
 RFC_PATTERN = re.compile(r"\bRFC\s*(\d{3,5})\b", re.I)
 SECTION_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)*)\.\s{2,}(.+?)\s*$")
 NORMATIVE_PATTERN = re.compile(r"\b(?:MUST(?:\s+NOT)?|SHOULD(?:\s+NOT)?|MAY|REQUIRED|SHALL(?:\s+NOT)?)\b", re.I)
+RFC_FETCH_TIMEOUTS = (30, 60)
+RFC_FETCH_URLS = (
+    "https://www.rfc-editor.org/rfc/rfc{number}.txt",
+    "https://www.ietf.org/rfc/rfc{number}.txt",
+)
 
 
 def prepare_rfc_requirements(
@@ -64,12 +72,33 @@ def load_rfc_text(number: str, cache_dir: Path, *, offline: bool) -> Tuple[str, 
         return path.read_text(encoding="utf-8", errors="replace"), {"source_url": f"https://www.rfc-editor.org/rfc/rfc{number}.txt", "cache": str(path), "retrieval": "cache"}
     if offline:
         raise FileNotFoundError(f"RFC {number} is not cached and offline mode is enabled")
-    url = f"https://www.rfc-editor.org/rfc/rfc{number}.txt"
-    request = urllib.request.Request(url, headers={"User-Agent": "SpecDiff/1.0 (RFC obligation compiler)"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        text = response.read().decode("utf-8", errors="replace")
+    text, url = _fetch_rfc_text(number)
     path.write_text(text, encoding="utf-8")
     return text, {"source_url": url, "cache": str(path), "retrieval": "network"}
+
+
+def _fetch_rfc_text(number: str) -> Tuple[str, str]:
+    errors: List[str] = []
+    for url_template in RFC_FETCH_URLS:
+        url = url_template.format(number=number)
+        for timeout in RFC_FETCH_TIMEOUTS:
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "SpecDiff/1.0 (RFC obligation compiler)"})
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    text = response.read().decode("utf-8", errors="replace")
+                if text.strip():
+                    return text, url
+                errors.append(f"{url} timeout={timeout}: empty response")
+            except (TimeoutError, socket.timeout) as exc:
+                errors.append(f"{url} timeout={timeout}: {exc}")
+            except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", exc)
+                errors.append(f"{url} timeout={timeout}: {reason}")
+            except OSError as exc:
+                errors.append(f"{url} timeout={timeout}: {exc}")
+            time.sleep(0.2)
+    detail = "; ".join(errors[:8])
+    raise TimeoutError(f"RFC {number} fetch failed after retries. Tried mirrors: {detail}")
 
 
 def extract_normative_clauses(number: str, title: str, text: str, *, max_per_rfc: Optional[int]) -> List[Dict[str, Any]]:

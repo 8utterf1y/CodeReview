@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+import urllib.error
 
 from specdiff.audit_runtime import (
     assemble_result,
@@ -18,7 +20,7 @@ from specdiff.audit_runtime import (
 )
 from specdiff.coverage_gate import validate_result
 from specdiff.spec_loader import extract_audit_requirements, load_spec_texts
-from specdiff.rfc_prepare import prepare_rfc_requirements
+from specdiff.rfc_prepare import load_rfc_text, prepare_rfc_requirements
 
 
 class AuditRuntimeTests(unittest.TestCase):
@@ -97,6 +99,44 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertLess(len(payload["requirement_packs"]), len(payload["clauses"]) + 2)
         self.assertEqual(payload["excluded_references"][0]["rfc"], "2119")
 
+    def test_rfc_fetch_retries_and_falls_back_to_second_mirror(self):
+        root = Path(self.temp.name)
+        cache = root / "rfc-cache"
+        attempts = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"RFC 9999 Example\n\n3.  Message Processing\n\nA receiver MUST validate the incoming message.\n"
+
+        def fake_urlopen(request, timeout):
+            attempts.append((request.full_url, timeout))
+            if "rfc-editor" in request.full_url:
+                raise urllib.error.URLError(TimeoutError("The read operation timed out"))
+            return FakeResponse()
+
+        with mock.patch("specdiff.rfc_prepare.urllib.request.urlopen", side_effect=fake_urlopen):
+            text, source = load_rfc_text("9999", cache, offline=False)
+        self.assertIn("MUST validate", text)
+        self.assertIn("ietf.org", source["source_url"])
+        self.assertTrue(any("rfc-editor" in url for url, _timeout in attempts))
+        self.assertTrue(any("ietf.org" in url for url, _timeout in attempts))
+
+    def test_rfc_fetch_timeout_has_actionable_error(self):
+        root = Path(self.temp.name)
+        cache = root / "rfc-cache"
+        with mock.patch(
+            "specdiff.rfc_prepare.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(TimeoutError("The read operation timed out")),
+        ):
+            with self.assertRaisesRegex(TimeoutError, r"RFC 9999 fetch failed after retries"):
+                load_rfc_text("9999", cache, offline=False)
+
     def test_simple_workflow_satisfied_finishes_without_reviewer(self):
         root = Path(self.temp.name)
         workspace = root / "simple-satisfied"
@@ -104,6 +144,7 @@ class AuditRuntimeTests(unittest.TestCase):
         init_audit(self.repo, self.requirements, workspace, out)
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "investigate")
+        self.assertIn("code_hints", action)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         submit_simple_investigation(workspace, self._payload("simple-satisfied-submit.json", {
             "requirement_id": "REQ-1", "conclusion": "satisfied",
@@ -126,6 +167,8 @@ class AuditRuntimeTests(unittest.TestCase):
             "summary": "The observed behavior contradicts the requirement.", "title": "Retry behavior mismatch",
             "severity": "high", "confidence": 0.8,
             "evidence_ids": query["evidence_ids"], "uncertainties": [],
+            "obligations": [{"id": "OBL-1", "description": "Retry must be absent here.", "source_clause_ids": ["REQ-1"]}],
+            "findings": [{"obligation_id": "OBL-1", "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
             "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "result": "none"}],
         }))
         action = next_action(workspace)
@@ -265,6 +308,17 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["clauses"], [])
         self.assertEqual(payload["requirement_packs"], [])
         self.assertEqual(payload["excluded_references"][0]["rfc"], "2119")
+
+    def test_mismatch_requires_obligations_and_findings(self):
+        query = code_query(self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        with self.assertRaisesRegex(ValueError, "non-empty obligations"):
+            submit_simple_investigation(self.workspace, self._payload("bad-mismatch.json", {
+                "requirement_id": "REQ-1", "conclusion": "mismatch", "mismatch_kind": "contradiction",
+                "summary": "Mismatch without worksheet details.",
+                "title": "Retry behavior mismatch", "severity": "high", "confidence": 0.8,
+                "evidence_ids": query["evidence_ids"], "uncertainties": [],
+                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "result": "none"}],
+            }))
 
     def test_obsoleted_rfc_is_historical_context(self):
         root = Path(self.temp.name)
