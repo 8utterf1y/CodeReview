@@ -8,28 +8,23 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 export default tool({
-  description: "Deprecated legacy investigation submission. Current agents must use frame_obligations followed by submit_conclusion.",
+  description: "Submit the final conclusion for already-framed obligations.",
   args: {
-    requirementId: tool.schema.string(),
+    requirementId: tool.schema.string().min(1),
     conclusion: tool.schema.enum(["satisfied", "mismatch", "uncertain"]),
     summary: tool.schema.string().min(1),
-    evidenceIds: tool.schema.array(tool.schema.string()),
-    uncertainties: tool.schema.array(tool.schema.string()),
-    obligations: tool.schema.array(tool.schema.object({
-      id: tool.schema.string(),
-      description: tool.schema.string(),
-      sourceClauseIds: tool.schema.array(tool.schema.string()),
-    })).optional(),
-    findings: tool.schema.array(tool.schema.object({
-      obligationId: tool.schema.string(),
+    obligationResults: tool.schema.array(tool.schema.object({
+      obligationId: tool.schema.string().min(1),
       status: tool.schema.enum(["supported", "contradicted", "partial", "not_found"]),
       evidenceIds: tool.schema.array(tool.schema.string()),
-    })).optional(),
+    })),
     negativeChecks: tool.schema.array(tool.schema.object({
-      dimension: tool.schema.string(),
+      dimension: tool.schema.string().min(1),
       status: tool.schema.enum(["searched", "not_applicable", "inconclusive"]),
-      result: tool.schema.string(),
+      queryIds: tool.schema.array(tool.schema.string()).optional(),
+      result: tool.schema.string().min(1),
     })).optional(),
+    uncertainties: tool.schema.array(tool.schema.string()),
     mismatchKind: tool.schema.enum(["missing", "partial", "contradiction"]).optional(),
     title: tool.schema.string().optional(),
     severity: tool.schema.enum(["critical", "high", "medium", "low"]).optional(),
@@ -37,24 +32,28 @@ export default tool({
   },
   async execute(args, context) {
     const payload = {
-      requirement_id: args.requirementId, conclusion: args.conclusion, summary: args.summary,
-      evidence_ids: args.evidenceIds, uncertainties: args.uncertainties,
-      obligations: (args.obligations || []).map((item) => ({
-        id: item.id,
-        description: item.description,
-        source_clause_ids: item.sourceClauseIds,
-      })),
-      findings: (args.findings || []).map((item) => ({
+      requirement_id: args.requirementId,
+      conclusion: args.conclusion,
+      summary: args.summary,
+      obligation_results: args.obligationResults.map((item) => ({
         obligation_id: item.obligationId,
         status: item.status,
         evidence_ids: item.evidenceIds,
       })),
-      negative_checks: args.negativeChecks || [],
-      mismatch_kind: args.mismatchKind, title: args.title, severity: args.severity,
+      negative_checks: (args.negativeChecks || []).map((item) => ({
+        dimension: item.dimension,
+        status: item.status,
+        query_ids: item.queryIds || [],
+        result: item.result,
+      })),
+      uncertainties: args.uncertainties,
+      mismatch_kind: args.mismatchKind,
+      title: args.title,
+      severity: args.severity,
       confidence: args.confidence,
     };
     const workspace = join(context.directory, ".specdiff", "audit");
-    return submit(workspace, "audit-submit-simple-investigation", payload);
+    return submit(workspace, "audit-submit-conclusion", payload);
   },
 });
 

@@ -46,6 +46,7 @@ def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Option
         "counters": {"query": 0, "evidence": 0}, "created_at": _now(), "updated_at": _now(),
     }
     _write_json(workspace / "audit-state.json", state)
+    _write_json(workspace / "investigation-drafts.json", {"schema_version": "1.0", "drafts": []})
     _write_json(workspace / "investigations.json", {"schema_version": "1.0", "investigations": []})
     _write_json(workspace / "verifications.json", {"schema_version": "1.0", "verifications": []})
     (workspace / "queries.jsonl").touch()
@@ -88,18 +89,23 @@ def next_action(workspace: Path) -> Dict[str, Any]:
         if item["investigation"] == "pending":
             requirement = requirements[req_id]
             return {
-                "next_action": "investigate",
+                "next_action": "frame_obligations",
                 "requirement_pack": requirement,
                 "requirement": requirement,
                 "code_hints": _code_hints_for_requirement(workspace, requirement),
-                "worksheet": [
-                    "STEP 1 explain the pack in repository terms",
-                    "STEP 2 frame 1 to 3 implementation obligations",
-                    "STEP 3 locate candidate code",
-                    "STEP 4 inspect actual behavior",
-                    "STEP 5 search alternatives or bypass paths",
-                    "STEP 6 submit one conclusion",
-                ],
+                "instruction": "Frame 1 to 3 implementation obligations tied to current pack clauses.",
+            }
+        if item["investigation"] == "framed":
+            requirement = requirements[req_id]
+            obligations = _draft_for_requirement(workspace, req_id)["obligations"]
+            return {
+                "next_action": "investigate",
+                "requirement_pack": requirement,
+                "requirement": requirement,
+                "obligations": obligations,
+                "code_hints": _code_hints_for_requirement(workspace, requirement),
+                "required_checks": required_checks(requirement, obligations),
+                "instruction": "Investigate the framed obligations and submit one conclusion.",
             }
     for req_id, item in state["requirements"].items():
         if item["verification"] == "pending" and item["investigation"] == "submitted":
@@ -107,6 +113,97 @@ def next_action(workspace: Path) -> Dict[str, Any]:
     if state["assembly_allowed"]:
         return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
     return {"next_action": "blocked", "reason": "audit state has no runnable transition", "status": audit_status(workspace)}
+
+
+def frame_obligations(workspace: Path, payload_path: Path) -> Dict[str, Any]:
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        payload = _load_json(payload_path)
+        req_id = str(payload.get("requirement_id") or "")
+        _require_requirement(state, req_id)
+        if state["requirements"][req_id]["investigation"] == "submitted":
+            raise ValueError("submission rejected: investigation is already submitted")
+        if state["requirements"][req_id]["investigation"] == "framed":
+            existing = _draft_for_requirement(workspace, req_id)
+            candidate = _normalize_framed_obligations(workspace, req_id, payload.get("obligations"))
+            if candidate == existing["obligations"]:
+                return {"accepted": True, "requirement_id": req_id, "obligations": existing["obligations"], "next_step": "investigate"}
+            raise ValueError("submission rejected: obligations already framed for this requirement")
+        obligations = _normalize_framed_obligations(workspace, req_id, payload.get("obligations"))
+        now = _now()
+        draft = {
+            "requirement_id": req_id, "status": "framed", "obligations": obligations,
+            "created_at": now, "updated_at": now,
+        }
+        _upsert(workspace / "investigation-drafts.json", "drafts", req_id, draft)
+        state["requirements"][req_id]["investigation"] = "framed"
+        _refresh_stage(state)
+        _save_state(workspace, state)
+        return {"accepted": True, "requirement_id": req_id, "obligations": obligations, "next_step": "investigate"}
+
+
+def submit_conclusion(workspace: Path, payload_path: Path) -> Dict[str, Any]:
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        payload = _load_json(payload_path)
+        req_id = str(payload.get("requirement_id") or "")
+        _require_requirement(state, req_id)
+        if state["requirements"][req_id]["investigation"] == "pending":
+            raise ValueError("submission rejected: current investigation phase is pending; call frame_obligations first")
+        if state["requirements"][req_id]["investigation"] != "framed":
+            raise ValueError(f"submission rejected: current investigation phase is {state['requirements'][req_id]['investigation']}")
+        draft = _draft_for_requirement(workspace, req_id)
+        conclusion = payload.get("conclusion")
+        if conclusion not in {"satisfied", "mismatch", "uncertain"}:
+            raise ValueError("conclusion must be satisfied, mismatch, or uncertain")
+        summary = str(payload.get("summary") or "").strip()
+        if not summary:
+            raise ValueError("summary is required")
+        requirement = next(item for item in _load_json(workspace / "requirements.json")["requirements"] if item["id"] == req_id)
+        obligation_results = _validate_obligation_results(workspace, req_id, draft["obligations"], payload.get("obligation_results") or [])
+        mismatch_kind = payload.get("mismatch_kind")
+        if conclusion == "mismatch" and mismatch_kind not in {"missing", "partial", "contradiction"}:
+            raise ValueError("mismatch requires mismatch_kind: missing, partial, or contradiction")
+        negative_checks = payload.get("negative_checks") or []
+        if conclusion == "mismatch":
+            _validate_negative_checks(req_id, workspace, negative_checks, mismatch_kind)
+            _validate_required_checks(req_id, requirement, draft["obligations"], mismatch_kind, negative_checks)
+        evidence_ids = sorted({
+            evidence_id for result in obligation_results for evidence_id in result.get("evidence_ids", [])
+        })
+        query_ids = sorted({
+            item["query_id"] for item in _jsonl_map(workspace / "queries.jsonl", "query_id").values()
+            if item["requirement_id"] == req_id and item["role"] == "investigator"
+        })
+        if conclusion != "uncertain" and not query_ids:
+            raise ValueError("submission rejected: submit_conclusion requires at least one investigator query")
+        proposed_status = {"satisfied": "covered", "mismatch": "violated", "uncertain": "unknown"}[conclusion]
+        if mismatch_kind == "partial":
+            proposed_status = "partial"
+        issue = None
+        if conclusion == "mismatch":
+            issue = {
+                "title": str(payload.get("title") or "").strip(),
+                "description": summary,
+                "match_type": {"missing": "missing_in_code", "partial": "partial_match", "contradiction": "mismatch"}[mismatch_kind],
+                "severity": payload.get("severity"), "confidence": payload.get("confidence"),
+            }
+            _validate_issue(issue)
+        canonical = {
+            "requirement_id": req_id, "proposed_status": proposed_status, "reasoning": summary,
+            "query_ids": query_ids, "evidence_ids": evidence_ids, "counterexample_query_ids": [],
+            "claim_scope": "absence" if mismatch_kind == "missing" else "behavior_path",
+            "unresolved_questions": payload.get("uncertainties") or [], "issue": issue,
+            "agent_conclusion": conclusion, "negative_checks": negative_checks,
+            "obligations": draft["obligations"], "obligation_results": obligation_results,
+            "findings": obligation_results, "submitted_at": _now(),
+        }
+        _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
+        state["requirements"][req_id]["investigation"] = "submitted"
+        state["requirements"][req_id]["verification"] = "pending" if conclusion == "mismatch" else "not_required"
+        _refresh_stage(state)
+        _save_state(workspace, state)
+        return {"accepted": True, "requirement_id": req_id, "conclusion": conclusion, "next": next_action(workspace)}
 
 
 def submit_simple_investigation(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -184,11 +281,15 @@ def review_bundle(workspace: Path, requirement_id: str) -> Dict[str, Any]:
     evidence = [evidence_map[item] for item in investigation.get("evidence_ids", []) if item in evidence_map]
     return {
         "requirement": requirement,
+        "requirement_pack": requirement,
+        "obligations": investigation.get("obligations") or [],
+        "obligation_results": investigation.get("obligation_results") or investigation.get("findings") or [],
+        "negative_checks": investigation.get("negative_checks") or [],
         "claim": {
             "conclusion": investigation.get("agent_conclusion"), "status": investigation["proposed_status"],
             "summary": investigation["reasoning"], "issue": investigation.get("issue"),
             "obligations": investigation.get("obligations") or [],
-            "findings": investigation.get("findings") or [],
+            "findings": investigation.get("obligation_results") or investigation.get("findings") or [],
         },
         "evidence": evidence,
         "search_summary": {
@@ -296,6 +397,10 @@ def _code_query(
     _require_requirement(state, requirement_id)
     if role not in {"investigator", "verifier"}:
         raise ValueError("role must be investigator or verifier")
+    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "pending":
+        raise ValueError("code_search rejected: current investigation phase is pending; call frame_obligations first")
+    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "submitted":
+        raise ValueError("code_search rejected: investigation is already submitted")
     requested_mode = mode
     mode = QUERY_MODE_ALIASES.get(mode.lower(), mode.lower())
     if mode not in {"concept", "source", "repo_map", "component", "build", "symbol", "references", "callers", "callees", "path", "data_flow"}:
@@ -640,6 +745,158 @@ def _validate_negative_checks(req_id: str, workspace: Path, checks: Any, mismatc
             raise ValueError("negative_checks entries must be objects")
         if item.get("status") not in {"searched", "not_applicable", "inconclusive"}:
             raise ValueError("negative_checks status must be searched, not_applicable, or inconclusive")
+        result = str(item.get("result") or "").strip()
+        if not result:
+            raise ValueError(f"negative check {item.get('dimension')}: result is required")
+        query_ids = item.get("query_ids") or []
+        if item.get("status") == "searched" and not query_ids:
+            raise ValueError(f"negative check {item.get('dimension')}: status=searched requires query_ids")
+        for query_id in query_ids:
+            query = _jsonl_map(workspace / "queries.jsonl", "query_id").get(query_id)
+            if not query or query["requirement_id"] != req_id or query["role"] != "investigator":
+                raise ValueError(f"negative check {item.get('dimension')}: invalid investigator query_id {query_id}")
+
+
+def required_checks(requirement: Dict[str, Any], obligations: List[Dict[str, Any]], mismatch_kind: Optional[str] = None) -> List[str]:
+    if requirement.get("pack_type") == "capability_presence" or mismatch_kind == "missing":
+        return ["symbol_or_file_search", "alternative_naming", "build_or_configuration", "responsibility"]
+    return ["alternative_implementation"]
+
+
+def _validate_required_checks(
+    req_id: str, requirement: Dict[str, Any], obligations: List[Dict[str, Any]],
+    mismatch_kind: Optional[str], checks: List[Dict[str, Any]],
+) -> None:
+    dimensions = {str(item.get("dimension")) for item in checks if isinstance(item, dict)}
+    missing = sorted(set(required_checks(requirement, obligations, mismatch_kind)) - dimensions)
+    if missing:
+        raise ValueError(f"submission rejected: missing required checks: {', '.join(missing)}")
+
+
+def _normalize_framed_obligations(workspace: Path, req_id: str, rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("frame_obligations requires a non-empty obligations array")
+    if len(rows) > 3:
+        raise ValueError("frame_obligations accepts at most 3 obligations")
+    requirement = next(item for item in _load_json(workspace / "requirements.json")["requirements"] if item["id"] == req_id)
+    pack_clause_ids = set(requirement.get("clause_ids") or [])
+    is_capability = requirement.get("pack_type") == "capability_presence"
+    allowed_source_ids = pack_clause_ids or {req_id}
+    obligations = []
+    seen_ids = set()
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"obligations[{index - 1}] must be an object")
+        description = str(row.get("description") or "").strip()
+        if not description:
+            raise ValueError(f"obligations[{index - 1}].description is required")
+        source_clause_ids = row.get("source_clause_ids")
+        if source_clause_ids is None:
+            source_clause_ids = row.get("sourceClauseIds")
+        source_clause_ids = source_clause_ids or []
+        if not isinstance(source_clause_ids, list) or not all(isinstance(item, str) for item in source_clause_ids):
+            raise ValueError(f"obligations[{index - 1}].source_clause_ids must be a string array")
+        if not source_clause_ids and not is_capability:
+            raise ValueError(f"obligations[{index - 1}].source_clause_ids are required")
+        if source_clause_ids and not set(source_clause_ids).issubset(allowed_source_ids):
+            raise ValueError(f"obligations[{index - 1}].source_clause_ids must belong to the current Requirement Pack")
+        obligation_id = _obligation_id(req_id, description, source_clause_ids)
+        if obligation_id in seen_ids:
+            raise ValueError(f"duplicate framed obligation: {obligation_id}")
+        seen_ids.add(obligation_id)
+        obligations.append({
+            "id": obligation_id,
+            "description": description,
+            "source_clause_ids": sorted(source_clause_ids),
+        })
+    return obligations
+
+
+def _validate_obligation_results(workspace: Path, req_id: str, obligations: List[Dict[str, Any]], rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        raise ValueError("obligation_results must be an array")
+    expected = {item["id"] for item in obligations}
+    seen = set()
+    evidence_map = _jsonl_map(workspace / "evidence.jsonl", "evidence_id")
+    results = []
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"obligation_results[{index - 1}] must be an object")
+        obligation_id = str(row.get("obligation_id") or row.get("obligationId") or "").strip()
+        if obligation_id not in expected:
+            raise ValueError(f"submission rejected: unknown obligation id {obligation_id}")
+        if obligation_id in seen:
+            raise ValueError(f"submission rejected: duplicate obligation result for {obligation_id}")
+        seen.add(obligation_id)
+        status = row.get("status")
+        if status not in {"supported", "contradicted", "partial", "not_found"}:
+            raise ValueError("obligation result status must be supported, contradicted, partial, or not_found")
+        evidence_ids = row.get("evidence_ids")
+        if evidence_ids is None:
+            evidence_ids = row.get("evidenceIds")
+        evidence_ids = evidence_ids or []
+        if status in {"supported", "contradicted", "partial"} and not evidence_ids:
+            raise ValueError(f"submission rejected: {obligation_id} result {status} requires evidence_ids")
+        for evidence_id in evidence_ids:
+            evidence = evidence_map.get(evidence_id)
+            if not evidence or evidence["requirement_id"] != req_id:
+                raise ValueError(f"submission rejected: {obligation_id} has invalid evidence_id {evidence_id}")
+        results.append({"obligation_id": obligation_id, "status": status, "evidence_ids": evidence_ids})
+    missing = sorted(expected - seen)
+    if missing:
+        raise ValueError(f"submission rejected: missing obligation result for {', '.join(missing)}")
+    return sorted(results, key=lambda item: item["obligation_id"])
+
+
+def _draft_for_requirement(workspace: Path, req_id: str) -> Dict[str, Any]:
+    drafts_path = workspace / "investigation-drafts.json"
+    payload = _load_json(drafts_path) if drafts_path.exists() else {"schema_version": "1.0", "drafts": []}
+    draft = next((item for item in payload.get("drafts", []) if item.get("requirement_id") == req_id), None)
+    if not draft:
+        raise ValueError(f"no framed obligations found for {req_id}")
+    return draft
+
+
+def _obligation_id(req_id: str, description: str, source_clause_ids: List[str]) -> str:
+    normalized = re.sub(r"\s+", " ", description.strip().lower())
+    digest = hashlib.sha256(
+        json.dumps([req_id, normalized, sorted(source_clause_ids)], sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8].upper()
+    return f"OBL-{digest}"
+
+
+def _spec_evidence_for_issue(req: Dict[str, Any], investigation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    obligations = {item["id"]: item for item in investigation.get("obligations", [])}
+    clause_ids = []
+    for result in investigation.get("obligation_results") or investigation.get("findings") or []:
+        if result.get("status") not in {"contradicted", "partial", "not_found"}:
+            continue
+        obligation = obligations.get(result.get("obligation_id"))
+        if not obligation:
+            continue
+        clause_ids.extend(obligation.get("source_clause_ids") or [])
+    clause_ids = sorted(set(clause_ids))
+    clause_map = {item.get("id"): item for item in req.get("clauses", []) if isinstance(item, dict)}
+    rows = []
+    for clause_id in clause_ids:
+        clause = clause_map.get(clause_id)
+        if clause:
+            rows.append({
+                "clause_id": clause_id,
+                "document": clause.get("document") or clause.get("document_id") or req.get("document"),
+                "section": clause.get("section") or req.get("section"),
+                "quote": clause.get("quote") or clause.get("text") or req.get("quote"),
+            })
+        else:
+            rows.append({
+                "clause_id": clause_id,
+                "document": req.get("document"),
+                "section": req.get("section"),
+                "quote": req.get("quote"),
+            })
+    if rows:
+        return rows
+    return [{"document": req.get("document"), "section": req.get("section"), "quote": req.get("quote")}]
 
 
 def _validate_obligation_findings(workspace: Path, req_id: str, obligations: Any, findings: Any) -> None:
@@ -843,7 +1100,17 @@ def _verification_required(workspace: Path, investigation: Dict[str, Any]) -> bo
 def _assemble_issue(index: int, req: Dict[str, Any], investigation: Dict[str, Any], verification: Dict[str, Any], evidence_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     draft = investigation.get("issue") or {}
     evidence_ids = investigation["evidence_ids"]
-    return {"id": f"ISSUE-{index:03d}", "requirement_id": req["id"], "title": draft.get("title") or req["normalized"], "match_type": draft.get("match_type") or investigation["proposed_status"], "severity": draft.get("severity") or "medium", "confidence": draft.get("confidence") or 0.6, "description": draft.get("description") or investigation["reasoning"], "spec_evidence": {"document": req.get("document"), "section": req.get("section"), "quote": req["quote"]}, "evidence_ids": evidence_ids, "code_evidence": [evidence_map[item] for item in evidence_ids if item in evidence_map], "verification": {"verdict": verification["verdict"], "reasoning": verification["reasoning"], "challenges": verification["challenges"]}}
+    spec_evidence = _spec_evidence_for_issue(req, investigation)
+    legacy_spec = spec_evidence[0] if spec_evidence else {"document": req.get("document"), "section": req.get("section"), "quote": req["quote"]}
+    return {
+        "id": f"ISSUE-{index:03d}", "requirement_id": req["id"],
+        "title": draft.get("title") or req["normalized"], "match_type": draft.get("match_type") or investigation["proposed_status"],
+        "severity": draft.get("severity") or "medium", "confidence": draft.get("confidence") or 0.6,
+        "description": draft.get("description") or investigation["reasoning"],
+        "spec_evidence": legacy_spec, "spec_evidence_items": spec_evidence,
+        "evidence_ids": evidence_ids, "code_evidence": [evidence_map[item] for item in evidence_ids if item in evidence_map],
+        "verification": {"verdict": verification["verdict"], "reasoning": verification["reasoning"], "challenges": verification["challenges"]},
+    }
 
 
 def _upsert(path: Path, key: str, req_id: str, value: Dict[str, Any]) -> None:

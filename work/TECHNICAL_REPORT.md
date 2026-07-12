@@ -14,8 +14,11 @@ repo + docs + out
   -> Requirement Pack Builder
   -> Code Facts SQLite index
   -> audit_next
-  -> Code Investigator
-  -> submit_investigation
+  -> Code Investigator frames obligations
+  -> frame_obligations
+  -> audit_next
+  -> Code Investigator searches evidence
+  -> submit_conclusion
   -> Evidence Reviewer only for mismatch candidates
   -> audit_finish
   -> issues.json + SARIF
@@ -51,9 +54,11 @@ only. There is no ctags, CodeQL, Joern, SCIP, or Semgrep backend in the current 
 
 ## 5. Mismatch Gate
 
-Before a mismatch can reach the lightweight Reviewer, `submit_investigation` enforces structured evidence and
+Before a mismatch can reach the lightweight Reviewer, `frame_obligations` first stores program-controlled
+obligations with stable IDs. `submit_conclusion` then enforces structured evidence, all obligation results, and
 minimum negative checks. Missing-capability claims require checks for symbol/file search, alternative naming,
 build/configuration, and responsibility. Behavior mismatch claims require an alternative-implementation check.
+Every searched negative check must cite the `query_id` that produced it.
 
 The Reviewer does not search the repository. It only checks whether the supplied spec evidence, code evidence,
 and reasoning support the mismatch. Only accepted mismatch or partial findings are assembled into final issues.

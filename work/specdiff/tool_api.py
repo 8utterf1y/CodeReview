@@ -13,10 +13,12 @@ from .audit_runtime import (
     audit_requirements,
     audit_status,
     code_query,
+    frame_obligations,
     init_audit,
     finish_audit,
     next_action,
     review_bundle,
+    submit_conclusion,
     submit_simple_investigation,
     submit_simple_review,
     submit_investigation,
@@ -105,6 +107,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("audit-review-bundle")
     p.add_argument("--workspace", required=True)
     p.add_argument("--requirement-id", required=True)
+
+    p = sub.add_parser("audit-frame-obligations")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--payload", required=True)
+
+    p = sub.add_parser("audit-submit-conclusion")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--payload", required=True)
 
     p = sub.add_parser("audit-submit-simple-investigation")
     p.add_argument("--workspace", required=True)
@@ -211,6 +221,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _emit(next_action(Path(args.workspace)))
         if args.cmd == "audit-review-bundle":
             return _emit(review_bundle(Path(args.workspace), args.requirement_id))
+        if args.cmd == "audit-frame-obligations":
+            return _emit(frame_obligations(Path(args.workspace), Path(args.payload)))
+        if args.cmd == "audit-submit-conclusion":
+            return _emit(submit_conclusion(Path(args.workspace), Path(args.payload)))
         if args.cmd == "audit-submit-simple-investigation":
             return _emit(submit_simple_investigation(Path(args.workspace), Path(args.payload)))
         if args.cmd == "audit-submit-simple-review":

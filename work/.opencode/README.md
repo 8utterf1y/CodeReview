@@ -51,9 +51,10 @@ agents investigate and verify through typed tools:
 
 1. load explicit requirements or compile an RFC inventory into Requirement Packs,
 2. build SQLite Code Facts with Aider Tree-sitter tags,
-3. investigate each Requirement Pack using controlled queries,
-4. review mismatch evidence once with a lightweight Reviewer,
-5. assemble machine-readable findings programmatically.
+3. frame 1-3 implementation obligations for each Requirement Pack,
+4. investigate those obligations using controlled `code_search` queries,
+5. review mismatch evidence once with a lightweight Reviewer,
+6. assemble machine-readable findings programmatically.
 
 Primary artifacts:
 
@@ -64,11 +65,13 @@ Primary artifacts:
 - `tools/audit_start.ts`
 - `tools/audit_next.ts`
 - `tools/code_search.ts`
-- `tools/submit_investigation.ts`
+- `tools/frame_obligations.ts`
+- `tools/submit_conclusion.ts`
 - `tools/submit_review.ts`
 - `tools/audit_finish.ts`
 
-The legacy `python3 -m specdiff` CLI is auxiliary scanner code. The OpenCode path above is the controlled audit
-workflow.
+`tools/submit_investigation.ts` is retained only as a legacy compatibility shim and is denied by the current
+Investigator agent. The OpenCode path above is the controlled audit workflow; the legacy `python3 -m specdiff`
+CLI is auxiliary scanner code.
 
 Do not specialize the workflow for any public benchmark issue type. Public samples are validation fixtures only; the audit must be driven by extracted requirements, repository evidence, and the coverage matrix.

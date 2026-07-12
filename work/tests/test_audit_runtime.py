@@ -9,9 +9,11 @@ from specdiff.audit_runtime import (
     assemble_result,
     audit_status,
     code_query,
+    frame_obligations,
     init_audit,
     finish_audit,
     next_action,
+    submit_conclusion,
     submit_simple_investigation,
     submit_simple_review,
     submit_investigation,
@@ -55,11 +57,20 @@ class AuditRuntimeTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def _frame_default(self, workspace=None, req_id="REQ-1"):
+        workspace = workspace or self.workspace
+        framed = frame_obligations(workspace, self._payload(f"frame-{req_id}.json", {
+            "requirement_id": req_id,
+            "obligations": [{"description": "The implementation should satisfy the requirement.", "source_clause_ids": [req_id]}],
+        }))
+        return framed["obligations"][0]["id"]
+
     def test_spec_loader_rejects_filesystem_root(self):
         with self.assertRaisesRegex(ValueError, "refusing to scan filesystem root"):
             load_spec_texts(Path("/"))
 
     def test_query_mode_aliases_are_normalized(self):
+        self._frame_default()
         query = code_query(self.workspace, "REQ-1", "investigator", "defs", query="handle_error")
         self.assertEqual(query["mode"], "symbol")
         self.assertEqual(query["parameters"]["requested_mode"], "defs")
@@ -143,13 +154,20 @@ class AuditRuntimeTests(unittest.TestCase):
         out = root / "simple-satisfied.json"
         init_audit(self.repo, self.requirements, workspace, out)
         action = next_action(workspace)
-        self.assertEqual(action["next_action"], "investigate")
+        self.assertEqual(action["next_action"], "frame_obligations")
         self.assertIn("code_hints", action)
+        framed = frame_obligations(workspace, self._payload("simple-satisfied-frame.json", {
+            "requirement_id": "REQ-1",
+            "obligations": [{"description": "The implementation should retry transient failures.", "source_clause_ids": ["REQ-1"]}],
+        }))
+        obligation_id = framed["obligations"][0]["id"]
+        self.assertEqual(next_action(workspace)["next_action"], "investigate")
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
-        submit_simple_investigation(workspace, self._payload("simple-satisfied-submit.json", {
+        submit_conclusion(workspace, self._payload("simple-satisfied-submit.json", {
             "requirement_id": "REQ-1", "conclusion": "satisfied",
             "summary": "The error handler schedules a retry.",
-            "evidence_ids": query["evidence_ids"], "uncertainties": [],
+            "obligation_results": [{"obligation_id": obligation_id, "status": "supported", "evidence_ids": query["evidence_ids"]}],
+            "uncertainties": [],
         }))
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         result = finish_audit(workspace)
@@ -161,15 +179,20 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "simple-mismatch"
         out = root / "simple-mismatch.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        framed = frame_obligations(workspace, self._payload("simple-mismatch-frame.json", {
+            "requirement_id": "REQ-1",
+            "obligations": [{"description": "Retry behavior should be absent in this mismatch fixture.", "source_clause_ids": ["REQ-1"]}],
+        }))
+        obligation_id = framed["obligations"][0]["id"]
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
-        submit_simple_investigation(workspace, self._payload("simple-mismatch-submit.json", {
+        negative_query = code_query(workspace, "REQ-1", "investigator", "concept", query="alternate_retry")
+        submit_conclusion(workspace, self._payload("simple-mismatch-submit.json", {
             "requirement_id": "REQ-1", "conclusion": "mismatch", "mismatch_kind": "contradiction",
             "summary": "The observed behavior contradicts the requirement.", "title": "Retry behavior mismatch",
             "severity": "high", "confidence": 0.8,
-            "evidence_ids": query["evidence_ids"], "uncertainties": [],
-            "obligations": [{"id": "OBL-1", "description": "Retry must be absent here.", "source_clause_ids": ["REQ-1"]}],
-            "findings": [{"obligation_id": "OBL-1", "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
-            "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "result": "none"}],
+            "obligation_results": [{"obligation_id": obligation_id, "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
+            "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [negative_query["query_id"]], "result": "none"}],
+            "uncertainties": [],
         }))
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "review")
@@ -183,6 +206,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(len(json.loads(out.read_text())["issues"]), 1)
 
     def test_index_v1_and_controlled_assembly(self):
+        self._frame_default()
         repository = json.loads((self.workspace / "code-index" / "repository.json").read_text())
         self.assertEqual(repository["languages"]["c"], 1)
         self.assertEqual(repository["build_systems"], ["make"])
@@ -192,7 +216,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(symbol_query["result_count"], 1)
         repo_map = code_query(self.workspace, "REQ-1", "investigator", "repo_map", limit=5)
         self.assertGreaterEqual(repo_map["result_count"], 1)
-        self.assertEqual(audit_status(self.workspace)["pending_investigations"], ["REQ-1"])
+        self.assertEqual(audit_status(self.workspace)["counts"]["investigation_framed"], 1)
 
         investigation_query = code_query(
             self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry"
@@ -259,6 +283,7 @@ class AuditRuntimeTests(unittest.TestCase):
             )
 
     def test_low_risk_exact_local_fact_can_skip_agent_verification(self):
+        self._frame_default()
         source = code_query(
             self.workspace, "REQ-1", "investigator", "source", path="src/retry.c", start=2, end=2
         )
@@ -279,6 +304,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(status["counts"]["verification_not_required"], 1)
 
     def test_verifier_sees_conclusion_only_after_own_query(self):
+        self._frame_default()
         investigation_query = code_query(
             self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry"
         )
@@ -291,7 +317,7 @@ class AuditRuntimeTests(unittest.TestCase):
                 "evidence_ids": investigation_query["evidence_ids"],
                 "counterexample_query_ids": [],
                 "issue": {"title": "Gap", "match_type": "partial_match", "severity": "low", "confidence": 0.6, "description": "Gap"},
-                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "result": "none"}],
+                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [investigation_query["query_id"]], "result": "none"}],
             }),
         )
         with self.assertRaisesRegex(ValueError, "verifier-owned query"):
@@ -310,15 +336,125 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["excluded_references"][0]["rfc"], "2119")
 
     def test_mismatch_requires_obligations_and_findings(self):
-        query = code_query(self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
-        with self.assertRaisesRegex(ValueError, "non-empty obligations"):
-            submit_simple_investigation(self.workspace, self._payload("bad-mismatch.json", {
+        with self.assertRaisesRegex(ValueError, "call frame_obligations first"):
+            submit_conclusion(self.workspace, self._payload("bad-mismatch.json", {
                 "requirement_id": "REQ-1", "conclusion": "mismatch", "mismatch_kind": "contradiction",
                 "summary": "Mismatch without worksheet details.",
                 "title": "Retry behavior mismatch", "severity": "high", "confidence": 0.8,
-                "evidence_ids": query["evidence_ids"], "uncertainties": [],
-                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "result": "none"}],
+                "obligation_results": [], "uncertainties": [],
+                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [], "result": "none"}],
             }))
+
+    def test_frame_obligations_rejects_outside_clause(self):
+        root = Path(self.temp.name)
+        reqs = root / "pack.json"
+        reqs.write_text(json.dumps({"requirement_packs": [{
+            "id": "PACK-1", "document": "RFC 9999", "section": "3",
+            "quote": "A receiver MUST validate messages.", "normalized": "Validate messages.",
+            "keywords": ["validate"], "clause_ids": ["RFC9999:3:p0001"],
+            "clauses": [{"id": "RFC9999:3:p0001", "document": "RFC 9999", "section": "3", "quote": "A receiver MUST validate messages."}],
+        }]}), encoding="utf-8")
+        workspace = root / "pack-audit"
+        init_audit(self.repo, reqs, workspace)
+        with self.assertRaisesRegex(ValueError, "source_clause_ids must belong"):
+            frame_obligations(workspace, self._payload("outside-clause.json", {
+                "requirement_id": "PACK-1",
+                "obligations": [{"description": "Validate messages.", "source_clause_ids": ["RFC9999:9:p0001"]}],
+            }))
+
+    def test_code_search_rejected_before_framing(self):
+        with self.assertRaisesRegex(ValueError, "call frame_obligations first"):
+            code_query(self.workspace, "REQ-1", "investigator", "concept", query="retry")
+
+    def test_submit_conclusion_requires_all_obligation_results(self):
+        root = Path(self.temp.name)
+        workspace = root / "two-obligations"
+        init_audit(self.repo, self.requirements, workspace)
+        framed = frame_obligations(workspace, self._payload("two-frame.json", {
+            "requirement_id": "REQ-1",
+            "obligations": [
+                {"description": "First obligation.", "source_clause_ids": ["REQ-1"]},
+                {"description": "Second obligation.", "source_clause_ids": ["REQ-1"]},
+            ],
+        }))
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        with self.assertRaisesRegex(ValueError, "missing obligation result"):
+            submit_conclusion(workspace, self._payload("missing-result.json", {
+                "requirement_id": "REQ-1", "conclusion": "satisfied",
+                "summary": "Only one obligation was checked.",
+                "obligation_results": [{"obligation_id": framed["obligations"][0]["id"], "status": "supported", "evidence_ids": query["evidence_ids"]}],
+                "uncertainties": [],
+            }))
+
+    def test_submit_conclusion_rejects_unknown_obligation_id(self):
+        root = Path(self.temp.name)
+        workspace = root / "unknown-obligation"
+        init_audit(self.repo, self.requirements, workspace)
+        self._frame_default(workspace)
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        with self.assertRaisesRegex(ValueError, "unknown obligation id"):
+            submit_conclusion(workspace, self._payload("unknown-obligation.json", {
+                "requirement_id": "REQ-1", "conclusion": "satisfied",
+                "summary": "Unknown obligation.",
+                "obligation_results": [{"obligation_id": "OBL-FAKE", "status": "supported", "evidence_ids": query["evidence_ids"]}],
+                "uncertainties": [],
+            }))
+
+    def test_negative_check_searched_requires_query_ids(self):
+        root = Path(self.temp.name)
+        workspace = root / "negative-query-binding"
+        init_audit(self.repo, self.requirements, workspace)
+        obligation_id = self._frame_default(workspace)
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        with self.assertRaisesRegex(ValueError, "status=searched requires query_ids"):
+            submit_conclusion(workspace, self._payload("bad-negative.json", {
+                "requirement_id": "REQ-1", "conclusion": "mismatch", "mismatch_kind": "contradiction",
+                "summary": "Negative check lacks query binding.", "title": "Mismatch", "severity": "high", "confidence": 0.8,
+                "obligation_results": [{"obligation_id": obligation_id, "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
+                "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [], "result": "none"}],
+                "uncertainties": [],
+            }))
+
+    def test_final_issue_uses_failed_obligation_clause_provenance(self):
+        root = Path(self.temp.name)
+        reqs = root / "pack.json"
+        reqs.write_text(json.dumps({"requirement_packs": [{
+            "id": "PACK-2", "document": "RFC 9999", "section": "3",
+            "quote": "Pack quote.", "normalized": "Validate and respond.",
+            "keywords": ["validate", "respond"], "clause_ids": ["RFC9999:3:p0001", "RFC9999:3:p0002"],
+            "clauses": [
+                {"id": "RFC9999:3:p0001", "document": "RFC 9999", "section": "3", "quote": "A receiver MUST validate messages."},
+                {"id": "RFC9999:3:p0002", "document": "RFC 9999", "section": "3", "quote": "A receiver MUST respond to valid messages."},
+            ],
+        }]}), encoding="utf-8")
+        workspace = root / "provenance-audit"
+        out = root / "issues.json"
+        init_audit(self.repo, reqs, workspace, out)
+        framed = frame_obligations(workspace, self._payload("provenance-frame.json", {
+            "requirement_id": "PACK-2",
+            "obligations": [{"description": "Validate and respond.", "source_clause_ids": ["RFC9999:3:p0001", "RFC9999:3:p0002"]}],
+        }))
+        obligation_id = framed["obligations"][0]["id"]
+        query = code_query(workspace, "PACK-2", "investigator", "concept", query="schedule_retry")
+        negative_query = code_query(workspace, "PACK-2", "investigator", "concept", query="validate respond")
+        submit_conclusion(workspace, self._payload("provenance-conclusion.json", {
+            "requirement_id": "PACK-2", "conclusion": "mismatch", "mismatch_kind": "contradiction",
+            "summary": "Implementation evidence contradicts the obligation.", "title": "Validation mismatch",
+            "severity": "high", "confidence": 0.8,
+            "obligation_results": [{"obligation_id": obligation_id, "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
+            "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [negative_query["query_id"]], "result": "none"}],
+            "uncertainties": [],
+        }))
+        submit_simple_review(workspace, self._payload("provenance-review.json", {
+            "requirement_id": "PACK-2", "verdict": "accept",
+            "reason": "The supplied packet supports the mismatch.", "unsupported_claims": [],
+        }))
+        finish_audit(workspace)
+        issue = json.loads(out.read_text())["issues"][0]
+        self.assertEqual(
+            [item["clause_id"] for item in issue["spec_evidence_items"]],
+            ["RFC9999:3:p0001", "RFC9999:3:p0002"],
+        )
 
     def test_obsoleted_rfc_is_historical_context(self):
         root = Path(self.temp.name)
@@ -363,7 +499,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "cap-audit"
         init_audit(self.repo, requirements, workspace)
         action = next_action(workspace)
-        self.assertEqual(action["next_action"], "investigate")
+        self.assertEqual(action["next_action"], "frame_obligations")
         self.assertTrue(action["requirement_pack"]["id"].startswith("PACK-RFC4000"))
 
     def test_corpus_compression_and_determinism(self):

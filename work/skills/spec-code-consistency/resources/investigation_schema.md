@@ -1,6 +1,6 @@
 # Investigation Artifacts
 
-Use three separate JSON artifacts. Agents may add explanatory fields, but must preserve these fields.
+Use program-owned artifacts. Agents do not write these files directly; they fill typed tool forms.
 
 ## Requirement Models
 
@@ -35,30 +35,52 @@ Use three separate JSON artifacts. Agents may add explanatory fields, but must p
 }
 ```
 
-## Investigation
+## Obligation Framing
 
 ```json
 {
   "schema_version": "1.0",
-  "artifact_type": "investigation",
-  "investigations": [{
-    "requirement_id": "REQ-001",
-    "obligation_results": [{
-      "obligation_id": "REQ-001-PO-1",
-      "status": "supported|contradicted|unresolved|not_applicable",
-      "queries": [{
-        "type": "concept_search|symbol_definition|references|callers|callees|ast|control_flow|data_flow|build_inclusion|absence_search|bypass_search",
-        "purpose": "...", "parameters": {}, "tools": [], "result_summary": "..."
-      }],
-      "evidence": [{"file": "src/a.c", "line": 10, "quote": "...", "role": "..."}],
-      "reasoning": "...", "unresolved_questions": []
-    }],
-    "counterexample_searches": [],
-    "proposed_status": "covered|violated|partial|no_evidence_found|unknown|out_of_scope|non_verifiable",
-    "proposed_findings": []
+  "artifact_type": "obligation_framing",
+  "requirement_id": "REQ-001",
+  "obligations": [{
+    "description": "Implementation behavior to check",
+    "source_clause_ids": ["RFC4861-7.2.8-001"]
   }]
 }
 ```
+
+The runtime assigns stable obligation IDs. Provide 1-3 obligations only, and use clause IDs from the supplied
+Requirement Pack.
+
+## Investigation Conclusion
+
+```json
+{
+  "schema_version": "1.0",
+  "artifact_type": "investigation_conclusion",
+  "investigations": [{
+    "requirement_id": "REQ-001",
+    "conclusion": "satisfied|mismatch|uncertain",
+    "obligation_results": [{
+      "obligation_id": "OBL-...",
+      "status": "supported|contradicted|partial|not_found|unresolved",
+      "evidence_ids": ["E-..."]
+    }],
+    "negative_checks": [{
+      "dimension": "symbol_or_file_search|alternative_naming|build_or_configuration|responsibility|alternative_implementation",
+      "status": "searched|not_applicable|inconclusive",
+      "query_ids": ["Q-..."],
+      "result": "..."
+    }],
+    "summary": "...",
+    "proposed_findings": [],
+    "uncertainties": []
+  }]
+}
+```
+
+A searched negative check must cite the query IDs that support it. Evidence IDs and query IDs must come from
+`code_search` for the same requirement.
 
 ## Verification
 
