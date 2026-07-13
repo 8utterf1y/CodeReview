@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 export default tool({
-  description: "Search indexed code for one requirement. Repository, role, query IDs, and evidence IDs are automatic.",
+  description: "Search indexed code for an active batch or one requirement. Query IDs and evidence IDs are automatic.",
   args: {
     requirementId: tool.schema.string().min(1),
     operation: tool.schema.enum(["text", "symbol", "references", "callers", "callees", "source", "repo_map", "component", "build"]),

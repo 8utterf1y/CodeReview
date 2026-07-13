@@ -80,7 +80,7 @@ Requirement Pack.
 ```
 
 A searched negative check must cite the query IDs that support it. Evidence IDs and query IDs must come from
-`code_search` for the same requirement.
+`code_search` for the active batch or the same requirement.
 
 ## Verification
 

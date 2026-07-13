@@ -20,20 +20,19 @@ and final assembly. Agents never edit controlled artifacts.
 1. `audit_start` locks requirements or Requirement Packs, builds/reuses Code Facts, builds Audit Batches, and
    returns one `next_action`.
 2. For `investigate_batch`, the Orchestrator passes the supplied batch unchanged to `code-investigator`.
-3. Investigator uses `code_search` and submits per-Pack results through `submit_batch_results`.
+3. Investigator first performs shared implementation discovery for the batch, then submits per-Pack results through
+   `submit_batch_results`.
 4. If a batch returns incomplete, the next `audit_next` fills missing Pack results as `unknown`.
 5. `audit_finish` alone writes JSON and SARIF.
 
-Each `audit_next` worker packet contains an `action_id`. Pass that same `action_id` to `audit_dispatch_result`.
-Do not reuse an old action ID after the runtime returns a retry packet.
-If `audit_next` returns `awaiting_dispatch_result`, call `audit_dispatch_result` for that action before doing
-anything else.
+Batch work does not use `audit_dispatch_result`. Legacy single-requirement actions may still return
+`awaiting_dispatch_result`; only then call `audit_dispatch_result`.
 
 ## Evidence Rules
 
 - Text, symbol, and Repo Map hits are navigation aids; exact source is stronger evidence.
 - A missing keyword is not proof of missing behavior. Check an alternate name or path.
-- Every cited evidence ID must come from `code_search` for the same requirement.
+- Every cited evidence ID must come from `code_search` for the active batch or the same requirement.
 - A searched negative check must cite the `query_id` that performed the search.
 - Tool limitations produce `uncertain`, not invented path or data-flow conclusions.
 - Tree-sitter/Aider tags provide the current symbol/reference index. If unavailable, semantic index coverage is

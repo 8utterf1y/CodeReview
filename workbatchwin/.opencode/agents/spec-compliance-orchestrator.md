@@ -36,6 +36,7 @@ arguments.
 2. Read the returned `next_action`.
 3. For `investigate_batch`, invoke `code-investigator` with the returned batch packet unchanged. After it returns,
    call `audit_next`; the runtime will fill missing Pack results as unknown before returning the next batch.
+   Do not call `audit_dispatch_result` for batch work.
 4. If `next_action` is `awaiting_dispatch_result`, call `audit_dispatch_result` for the returned action. Do not
    dispatch a subagent.
 5. For `frame_obligations`, invoke `code-investigator` with the returned packet unchanged.
@@ -51,5 +52,5 @@ arguments.
 12. For `finish`, call `audit_finish`. If it fails, report the state invariant error and stop.
 13. For `done`, report the output. For `blocked`, stop and report the reason.
 
-Never restart `audit_start` to recover a subagent failure. Never invent retry or recovery strategy. Never call
-`audit_next` immediately after a subagent return; `audit_dispatch_result` must validate the transition first.
+Never restart `audit_start` to recover a subagent failure. Never invent retry or recovery strategy. For
+non-batch subagent returns, do not call `audit_next` until `audit_dispatch_result` validates the transition.

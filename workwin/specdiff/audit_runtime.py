@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import fcntl
 import sqlite3
 import subprocess
+import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1487,11 +1488,59 @@ def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
 
 @contextmanager
-def _audit_lock(workspace: Path):
+def _audit_lock(workspace: Path, timeout: float = 30.0):
     workspace.mkdir(parents=True, exist_ok=True)
-    with (workspace / ".audit.lock").open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    lock_path = workspace / ".audit.lock"
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0 and lock_path.stat().st_size == 0:
+            handle.write(b"0")
+            handle.flush()
+        _lock_file(handle, timeout=timeout)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
+
+
+def _lock_file(handle, *, timeout: float = 30.0) -> None:
+    if os.name == "nt":
+        _lock_file_windows(handle, timeout=timeout)
+    else:
+        _lock_file_posix(handle)
+
+
+def _unlock_file(handle) -> None:
+    if os.name == "nt":
+        _unlock_file_windows(handle)
+    else:
+        _unlock_file_posix(handle)
+
+
+def _lock_file_posix(handle) -> None:
+    import fcntl
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file_posix(handle) -> None:
+    import fcntl
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_file_windows(handle, *, timeout: float = 30.0) -> None:
+    import msvcrt
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out acquiring audit lock") from exc
+            time.sleep(0.05)
+
+
+def _unlock_file_windows(handle) -> None:
+    import msvcrt
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)

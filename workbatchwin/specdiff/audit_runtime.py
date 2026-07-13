@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import fcntl
 import sqlite3
 import subprocess
+import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -24,6 +25,10 @@ QUERY_MODE_ALIASES = {
     "call": "callers",
 }
 MAX_SUBAGENT_ATTEMPTS = 2
+TARGET_BATCHES = 24
+HARD_MAX_BATCHES = 30
+MAX_BATCH_QUERIES = 24
+MAX_BATCH_TEXT_QUERIES = 6
 
 
 def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Optional[Path] = None) -> Dict[str, Any]:
@@ -107,12 +112,17 @@ def submit_batch_results(workspace: Path, payload_path: Path) -> Dict[str, Any]:
         if not active or batch_id != active:
             raise ValueError(f"batch submission rejected: active batch is {active}, got {batch_id}")
         batch = _batch_by_id(workspace, batch_id)
-        results = _validate_batch_results(workspace, batch, payload.get("results") or [])
-        for result in results:
+        accepted, rejected = _validate_batch_results(workspace, batch, payload.get("results") or [])
+        for result in accepted:
             _persist_pack_result(workspace, state, result, reason=result.get("summary") or "batch result submitted")
         _refresh_stage(state)
         _save_state(workspace, state)
-        return {"accepted": True, "batch_id": batch_id, "results": len(results), "next": "call_audit_next"}
+        return {
+            "accepted": True, "batch_id": batch_id,
+            "accepted_results": [{"requirement_id": item["requirement_id"], "status": item["status"]} for item in accepted],
+            "rejected_results": rejected,
+            "next": "call_audit_next",
+        }
 
 
 def dispatch_result(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -481,17 +491,23 @@ def _code_query(
     path: str = "", start: int = 1, end: int = 200, limit: int = 50,
 ) -> Dict[str, Any]:
     state = _state(workspace)
-    _require_requirement(state, requirement_id)
+    query_scope = _query_scope(workspace, state, requirement_id, role)
     if role not in {"investigator", "verifier"}:
         raise ValueError("role must be investigator or verifier")
-    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "pending" and not _requirement_in_active_batch(workspace, state, requirement_id):
+    if (
+        query_scope["kind"] == "requirement"
+        and role == "investigator"
+        and state["requirements"][requirement_id]["investigation"] == "pending"
+        and not _requirement_in_active_batch(workspace, state, requirement_id)
+    ):
         raise ValueError("code_search rejected: current investigation phase is pending; call frame_obligations first")
-    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "submitted":
+    if query_scope["kind"] == "requirement" and role == "investigator" and state["requirements"][requirement_id]["investigation"] == "submitted":
         raise ValueError("code_search rejected: investigation is already submitted")
     requested_mode = mode
     mode = QUERY_MODE_ALIASES.get(mode.lower(), mode.lower())
     if mode not in {"concept", "source", "repo_map", "component", "build", "symbol", "references", "callers", "callees", "path", "data_flow"}:
         raise ValueError(f"unsupported query mode: {mode}")
+    _enforce_batch_query_budget(workspace, query_scope, role, mode)
     repo = Path(state["repo"])
     results: List[Dict[str, Any]] = []
     tool_status = "completed"
@@ -519,9 +535,42 @@ def _code_query(
         {"query": query, "path": path, "start": start, "end": end, "limit": limit,
          "requested_mode": requested_mode},
         [_materialize_result(repo, item) for item in results], tool_status, limitation,
-        coverage=coverage,
+        coverage=coverage, batch_id=query_scope.get("batch_id"),
     )
     return query_record
+
+
+def _query_scope(workspace: Path, state: Dict[str, Any], requirement_id: str, role: str) -> Dict[str, Any]:
+    if requirement_id in state["requirements"]:
+        return {"kind": "requirement", "requirement_id": requirement_id}
+    active_batch = state.get("active_batch_id")
+    if role == "investigator" and active_batch and requirement_id == active_batch:
+        batch = _batch_by_id(workspace, active_batch)
+        return {"kind": "batch", "batch_id": active_batch, "requirement_ids": batch["requirement_ids"]}
+    _require_requirement(state, requirement_id)
+    return {"kind": "requirement", "requirement_id": requirement_id}
+
+
+def _enforce_batch_query_budget(workspace: Path, query_scope: Dict[str, Any], role: str, mode: str) -> None:
+    batch_id = query_scope.get("batch_id")
+    if role != "investigator" or not batch_id:
+        return
+    queries_path = workspace / "queries.jsonl"
+    rows = []
+    if queries_path.exists():
+        rows = [json.loads(line) for line in queries_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    batch_queries = [item for item in rows if item.get("batch_id") == batch_id]
+    text_queries = [item for item in batch_queries if item.get("mode") == "concept"]
+    if len(batch_queries) >= MAX_BATCH_QUERIES:
+        raise ValueError(
+            f"batch query budget exceeded for {batch_id}: max {MAX_BATCH_QUERIES}. "
+            "Submit results from existing evidence and mark undecidable Packs unknown."
+        )
+    if mode == "concept" and len(text_queries) >= MAX_BATCH_TEXT_QUERIES:
+        raise ValueError(
+            f"batch text query budget exceeded for {batch_id}: max {MAX_BATCH_TEXT_QUERIES}. "
+            "Use symbol/source navigation or submit unknown for unresolved Packs."
+        )
 
 
 def submit_investigation(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -769,7 +818,12 @@ def _materialize_result(repo: Path, item: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def _record_query(workspace: Path, state: Dict[str, Any], req_id: str, role: str, mode: str, parameters: Dict[str, Any], results: List[Dict[str, Any]], tool_status: str, limitation: str, coverage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _record_query(
+    workspace: Path, state: Dict[str, Any], req_id: str, role: str, mode: str,
+    parameters: Dict[str, Any], results: List[Dict[str, Any]], tool_status: str,
+    limitation: str, coverage: Optional[Dict[str, Any]] = None,
+    batch_id: Optional[str] = None,
+) -> Dict[str, Any]:
     state["counters"]["query"] += 1
     query_id = f"Q-{state['counters']['query']:07d}"
     evidence_ids = []
@@ -779,9 +833,13 @@ def _record_query(workspace: Path, state: Dict[str, Any], req_id: str, role: str
             state["counters"]["evidence"] += 1
             evidence_id = f"E-{state['counters']['evidence']:08d}"
             evidence = {"evidence_id": evidence_id, "query_id": query_id, "requirement_id": req_id, **result}
+            if batch_id:
+                evidence["batch_id"] = batch_id
             evidence_file.write(json.dumps(evidence, ensure_ascii=False) + "\n")
             evidence_ids.append(evidence_id)
     record = {"query_id": query_id, "requirement_id": req_id, "role": role, "mode": mode, "parameters": parameters, "status": tool_status, "limitation": limitation, "coverage": coverage or {}, "result_count": len(results), "evidence_ids": evidence_ids, "created_at": _now()}
+    if batch_id:
+        record["batch_id"] = batch_id
     with (workspace / "queries.jsonl").open("a", encoding="utf-8") as query_file:
         query_file.write(json.dumps(record, ensure_ascii=False) + "\n")
     _save_state(workspace, state)
@@ -1088,36 +1146,74 @@ def _coverage_context(workspace: Path, repo: Path) -> Dict[str, Any]:
 
 
 def _code_hints_for_requirement(workspace: Path, requirement: Dict[str, Any], *, symbol_limit: int = 10, component_limit: int = 5) -> Dict[str, Any]:
+    affinity = _pack_code_affinity(workspace, requirement, symbol_limit=symbol_limit, component_limit=component_limit)
+    return {
+        "components": affinity.get("components") or [],
+        "symbols": affinity.get("symbols") or [],
+        "files": affinity.get("files") or [],
+        "symbol_families": affinity.get("symbol_families") or [],
+        "source": affinity.get("source") or "sqlite_codefacts",
+    }
+
+
+def _pack_code_affinity(
+    workspace: Path, requirement: Dict[str, Any], *, symbol_limit: int = 10,
+    component_limit: int = 5, file_limit: int = 8,
+) -> Dict[str, Any]:
     db_path = workspace / "code-index" / "codefacts.sqlite"
     if not db_path.exists():
-        return {"components": [], "symbols": [], "source": "unavailable"}
+        return {"components": [], "symbols": [], "files": [], "symbol_families": [], "source": "unavailable"}
     terms = _hint_terms(requirement)
     if not terms:
-        return {"components": [], "symbols": [], "source": "sqlite_codefacts"}
+        return {"components": [], "symbols": [], "files": [], "symbol_families": [], "source": "sqlite_codefacts"}
     connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     try:
         symbol_scores: Counter[str] = Counter()
         component_scores: Counter[str] = Counter()
+        file_scores: Counter[str] = Counter()
+        family_scores: Counter[str] = Counter()
         for term in terms[:6]:
             pattern = f"%{term.lower()}%"
             for row in connection.execute(
-                "SELECT name FROM symbols WHERE lower(name) LIKE ? LIMIT 20",
+                "SELECT s.name, f.path, f.component FROM symbols s JOIN files f USING(file_id) "
+                "WHERE lower(s.name) LIKE ? LIMIT 30",
                 (pattern,),
             ).fetchall():
                 symbol_scores[row["name"]] += 1
+                component_scores[row["component"]] += 1
+                file_scores[row["path"]] += 1
+                family = _symbol_family(row["name"])
+                if family:
+                    family_scores[family] += 1
             for row in connection.execute(
-                "SELECT component FROM files WHERE lower(path) LIKE ? OR lower(component) LIKE ? LIMIT 20",
+                "SELECT path, component FROM files WHERE lower(path) LIKE ? OR lower(component) LIKE ? LIMIT 30",
                 (pattern, pattern),
             ).fetchall():
                 component_scores[row["component"]] += 1
+                file_scores[row["path"]] += 1
+                for part in Path(row["path"]).parts:
+                    family = _symbol_family(part)
+                    if family:
+                        family_scores[family] += 1
         return {
             "components": [name for name, _score in component_scores.most_common(component_limit)],
             "symbols": [name for name, _score in symbol_scores.most_common(symbol_limit)],
+            "files": [name for name, _score in file_scores.most_common(file_limit)],
+            "symbol_families": [name for name, _score in family_scores.most_common(8)],
             "source": "sqlite_codefacts",
         }
     finally:
         connection.close()
+
+
+def _symbol_family(name: str) -> str:
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+|_", name.lower()) if len(token) >= 3]
+    if not tokens:
+        compact = re.sub(r"[^A-Za-z0-9]+", "", name.lower())
+        return compact[:12] if len(compact) >= 3 else ""
+    token = tokens[0]
+    return re.sub(r"\d+$", "", token)[:16]
 
 
 def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
@@ -1174,7 +1270,7 @@ def _next_batch_action_locked(workspace: Path, state: Dict[str, Any]) -> Dict[st
         batch = batches[cursor]
         state["batch_cursor"] = cursor + 1
         state["active_batch_id"] = batch["batch_id"]
-        return {"next_action": "investigate_batch", "batch": batch, "batch_id": batch["batch_id"]}
+        return {"next_action": "investigate_batch", "batch": _batch_packet(batch), "batch_id": batch["batch_id"]}
     _refresh_stage(state)
     if state["assembly_allowed"]:
         return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
@@ -1202,76 +1298,137 @@ def _finalize_active_batch(workspace: Path, state: Dict[str, Any]) -> None:
 
 
 def _build_audit_batches(workspace: Path, requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    affinities = {req["id"]: _pack_code_affinity(workspace, req) for req in requirements}
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for req in requirements:
-        grouped.setdefault(_batch_group_key(req), []).append(req)
-    batches: List[Dict[str, Any]] = []
-    for key in sorted(grouped):
-        rows = grouped[key]
-        chunk: List[Dict[str, Any]] = []
-        clause_count = 0
-        for req in rows:
-            req_clauses = len(req.get("clause_ids") or []) or 1
-            if chunk and (len(chunk) >= 6 or clause_count + req_clauses > 40):
-                batches.append(_make_batch(workspace, len(batches) + 1, key, chunk))
-                chunk, clause_count = [], 0
-            chunk.append(req)
-            clause_count += req_clauses
-        if chunk:
-            batches.append(_make_batch(workspace, len(batches) + 1, key, chunk))
-    return batches
+        grouped.setdefault(_initial_topic_key(req, affinities[req["id"]]), []).append(req)
+    topics = [_make_topic(key, rows, affinities) for key, rows in grouped.items()]
+    topics = _merge_topics_to_budget(topics, TARGET_BATCHES)
+    if len(topics) > HARD_MAX_BATCHES:
+        topics = _merge_topics_to_budget(topics, HARD_MAX_BATCHES)
+    topics = sorted(topics, key=lambda item: (-len(item["requirements"]), item["key"]))
+    return [_make_batch(index, topic) for index, topic in enumerate(topics, 1)]
 
 
-def _batch_group_key(req: Dict[str, Any]) -> str:
-    document = re.sub(r"[^A-Za-z0-9]+", "", str(req.get("document") or "DOC")).upper() or "DOC"
-    section = str(req.get("section") or "unknown")
-    section_prefix = ".".join(re.findall(r"\d+", section)[:1]) or "unknown"
-    family = _protocol_family(req)
-    return f"{document}|{section_prefix}|{family}"
+def _initial_topic_key(req: Dict[str, Any], affinity: Dict[str, Any]) -> str:
+    component = (affinity.get("components") or ["unknown"])[0]
+    family = (affinity.get("symbol_families") or ["general"])[0]
+    if component == "unknown":
+        document = re.sub(r"[^A-Za-z0-9]+", "", str(req.get("document") or "DOC")).upper() or "DOC"
+        return f"{document}|{family}"
+    return f"{component}|{family}"
 
 
-def _protocol_family(req: Dict[str, Any]) -> str:
-    text = " ".join(
-        [str(req.get("normalized") or ""), str(req.get("quote") or "")]
-        + [str(item) for item in req.get("keywords") or []]
-    ).lower()
-    families = [
-        ("mld", ("mld", "multicast listener")),
-        ("nd6", ("neighbor", "nd6", "router advertisement", "neighbour", "solicitation")),
-        ("icmp6", ("icmpv6", "icmp6")),
-        ("dhcp6", ("dhcpv6", "dhcp6")),
-        ("frag", ("fragment", "reassembly")),
-        ("socket", ("socket", "setsockopt", "recvmsg", "sendmsg")),
-        ("addr", ("address", "slaac", "autoconf")),
-        ("ip6", ("ipv6", "extension header", "flow label")),
-    ]
-    for name, terms in families:
-        if any(term in text for term in terms):
-            return name
-    return "general"
-
-
-def _make_batch(workspace: Path, index: int, key: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    hints = {"components": [], "symbols": [], "source": "sqlite_codefacts"}
-    components: Counter[str] = Counter()
-    symbols: Counter[str] = Counter()
+def _make_topic(key: str, rows: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    topic = {
+        "key": key,
+        "requirements": sorted(rows, key=_requirement_sort_key),
+        "components": Counter(),
+        "symbols": Counter(),
+        "files": Counter(),
+        "symbol_families": Counter(),
+        "keywords": Counter(),
+        "documents": Counter(),
+    }
     for req in rows:
-        req_hints = _code_hints_for_requirement(workspace, req)
-        for component in req_hints.get("components") or []:
-            components[component] += 1
-        for symbol in req_hints.get("symbols") or []:
-            symbols[symbol] += 1
-    hints["components"] = [item for item, _count in components.most_common(8)]
-    hints["symbols"] = [item for item, _count in symbols.most_common(16)]
+        affinity = affinities[req["id"]]
+        for field in ("components", "symbols", "files", "symbol_families"):
+            for value in affinity.get(field) or []:
+                topic[field][value] += 1
+        for value in _hint_terms(req)[:12]:
+            topic["keywords"][value] += 1
+        topic["documents"][str(req.get("document") or "")] += 1
+    return topic
+
+
+def _merge_topics_to_budget(topics: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
+    topics = list(topics)
+    while len(topics) > target:
+        best_pair = None
+        best_score = None
+        for left_index in range(len(topics)):
+            for right_index in range(left_index + 1, len(topics)):
+                score = _topic_merge_score(topics[left_index], topics[right_index])
+                pair_key = (score, -left_index, -right_index)
+                if best_score is None or pair_key > best_score:
+                    best_score = pair_key
+                    best_pair = (left_index, right_index)
+        if best_pair is None:
+            break
+        left_index, right_index = best_pair
+        merged = _merge_two_topics(topics[left_index], topics[right_index])
+        topics = [topic for index, topic in enumerate(topics) if index not in best_pair]
+        topics.append(merged)
+    return topics
+
+
+def _topic_merge_score(left: Dict[str, Any], right: Dict[str, Any]) -> float:
+    score = 0.0
+    left_component = next(iter(left["components"]), None)
+    right_component = next(iter(right["components"]), None)
+    if left_component and left_component == right_component:
+        score += 20
+    score += 8 * len(set(left["components"]) & set(right["components"]))
+    score += 6 * len(set(left["symbol_families"]) & set(right["symbol_families"]))
+    score += 4 * len(set(left["files"]) & set(right["files"]))
+    score += 1.5 * len(set(left["documents"]) & set(right["documents"]))
+    score += 1 * len(set(left["keywords"]) & set(right["keywords"]))
+    return score
+
+
+def _merge_two_topics(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {
+        "key": f"{left['key']}+{right['key']}",
+        "requirements": sorted(left["requirements"] + right["requirements"], key=_requirement_sort_key),
+        "components": Counter(left["components"]),
+        "symbols": Counter(left["symbols"]),
+        "files": Counter(left["files"]),
+        "symbol_families": Counter(left["symbol_families"]),
+        "keywords": Counter(left["keywords"]),
+        "documents": Counter(left["documents"]),
+    }
+    for field in ("components", "symbols", "files", "symbol_families", "keywords", "documents"):
+        merged[field].update(right[field])
+    return merged
+
+
+def _make_batch(index: int, topic: Dict[str, Any]) -> Dict[str, Any]:
+    rows = topic["requirements"]
+    hints = {
+        "components": [item for item, _count in topic["components"].most_common(8)],
+        "symbols": [item for item, _count in topic["symbols"].most_common(16)],
+        "files": [item for item, _count in topic["files"].most_common(16)],
+        "symbol_families": [item for item, _count in topic["symbol_families"].most_common(8)],
+        "source": "sqlite_codefacts_affinity",
+    }
     return {
         "batch_id": f"BATCH-{index:04d}",
-        "topic": f"BATCH-{key.replace('|', '-')}-{index:04d}",
-        "group_key": key,
+        "topic": f"BATCH-{topic['key'].replace('|', '-')[:80]}-{index:04d}",
+        "group_key": topic["key"],
         "requirement_ids": [req["id"] for req in rows],
         "requirements": rows,
         "code_hints": hints,
-        "limits": {"max_packs": 6, "max_clauses": 40},
+        "limits": {"max_queries": MAX_BATCH_QUERIES, "max_text_queries": MAX_BATCH_TEXT_QUERIES},
     }
+
+
+def _batch_packet(batch: Dict[str, Any]) -> Dict[str, Any]:
+    packet = dict(batch)
+    packet["requirements"] = [_compact_requirement(req) for req in batch["requirements"]]
+    return packet
+
+
+def _compact_requirement(req: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: req.get(key)
+        for key in ("id", "document", "section", "quote", "clause_ids", "normative_strength")
+        if key in req
+    }
+
+
+def _requirement_sort_key(req: Dict[str, Any]) -> tuple[str, List[int], str]:
+    section_numbers = [int(item) for item in re.findall(r"\d+", str(req.get("section") or ""))]
+    return (str(req.get("document") or ""), section_numbers, req["id"])
 
 
 def _batch_by_id(workspace: Path, batch_id: str) -> Dict[str, Any]:
@@ -1288,59 +1445,78 @@ def _requirement_in_active_batch(workspace: Path, state: Dict[str, Any], req_id:
     return req_id in set(_batch_by_id(workspace, batch_id)["requirement_ids"])
 
 
-def _validate_batch_results(workspace: Path, batch: Dict[str, Any], rows: Any) -> List[Dict[str, Any]]:
+def _validate_batch_results(workspace: Path, batch: Dict[str, Any], rows: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not isinstance(rows, list):
         raise ValueError("batch results must be an array")
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    seen = set()
+    for index, row in enumerate(rows):
+        try:
+            result = _validate_one_batch_result(workspace, batch, row, index, seen)
+            accepted.append(result)
+            seen.add(result["requirement_id"])
+        except ValueError as exc:
+            rejected.append({
+                "index": index,
+                "requirement_id": row.get("requirement_id") or row.get("requirementId") if isinstance(row, dict) else None,
+                "reason": str(exc),
+            })
+    return accepted, rejected
+
+
+def _validate_one_batch_result(
+    workspace: Path, batch: Dict[str, Any], row: Any, index: int, seen: set[str],
+) -> Dict[str, Any]:
     allowed = set(batch["requirement_ids"])
     requirements = {item["id"]: item for item in batch["requirements"]}
     evidence = _jsonl_map(workspace / "evidence.jsonl", "evidence_id")
-    seen = set()
-    results = []
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise ValueError(f"results[{index}] must be an object")
-        req_id = str(row.get("requirement_id") or row.get("requirementId") or "")
-        if req_id not in allowed:
-            raise ValueError(f"results[{index}] requirement_id is not in current batch: {req_id}")
-        if req_id in seen:
-            raise ValueError(f"duplicate batch result for {req_id}")
-        seen.add(req_id)
-        status = str(row.get("status") or "")
-        if status not in {"covered", "partial", "violated", "unknown"}:
-            raise ValueError("batch result status must be covered, partial, violated, or unknown")
-        summary = str(row.get("summary") or "").strip()
-        if not summary:
-            raise ValueError(f"{req_id}: summary is required")
-        evidence_ids = row.get("evidence_ids") if "evidence_ids" in row else row.get("evidenceIds")
-        evidence_ids = evidence_ids or []
-        if not isinstance(evidence_ids, list):
-            raise ValueError(f"{req_id}: evidence_ids must be an array")
-        for evidence_id in evidence_ids:
-            item = evidence.get(evidence_id)
-            if not item or item["requirement_id"] != req_id:
-                raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
-        spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
-        spec_clause_ids = spec_clause_ids or []
-        allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
-        if not isinstance(spec_clause_ids, list) or not set(spec_clause_ids).issubset(allowed_clauses):
-            raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
-        issue = row.get("issue")
-        if status == "violated":
-            _validate_batch_issue(issue)
-        confidence = row.get("confidence", 0.5)
-        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1:
-            raise ValueError(f"{req_id}: confidence must be between 0 and 1")
-        results.append({
-            "requirement_id": req_id, "status": status, "summary": summary,
-            "spec_clause_ids": spec_clause_ids, "evidence_ids": evidence_ids,
-            "confidence": confidence, "issue": issue,
-        })
-    return results
+    if not isinstance(row, dict):
+        raise ValueError(f"results[{index}] must be an object")
+    req_id = str(row.get("requirement_id") or row.get("requirementId") or "")
+    if req_id not in allowed:
+        raise ValueError(f"results[{index}] requirement_id is not in current batch: {req_id}")
+    if req_id in seen:
+        raise ValueError(f"duplicate batch result for {req_id}")
+    status = str(row.get("status") or "")
+    if status not in {"covered", "partial", "violated", "unknown"}:
+        raise ValueError("batch result status must be covered, partial, violated, or unknown")
+    summary = str(row.get("summary") or "").strip()
+    if not summary:
+        raise ValueError(f"{req_id}: summary is required")
+    evidence_ids = row.get("evidence_ids") if "evidence_ids" in row else row.get("evidenceIds")
+    evidence_ids = evidence_ids or []
+    if not isinstance(evidence_ids, list):
+        raise ValueError(f"{req_id}: evidence_ids must be an array")
+    for evidence_id in evidence_ids:
+        item = evidence.get(evidence_id)
+        if not item or not _evidence_allowed_for_batch_result(item, batch["batch_id"], req_id):
+            raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
+    spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
+    spec_clause_ids = spec_clause_ids or []
+    allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
+    if not isinstance(spec_clause_ids, list) or not set(spec_clause_ids).issubset(allowed_clauses):
+        raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
+    issue = row.get("issue")
+    if status in {"partial", "violated"}:
+        _validate_batch_issue(issue)
+    confidence = row.get("confidence", 0.5)
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1:
+        raise ValueError(f"{req_id}: confidence must be between 0 and 1")
+    return {
+        "requirement_id": req_id, "status": status, "summary": summary,
+        "spec_clause_ids": spec_clause_ids, "evidence_ids": evidence_ids,
+        "confidence": confidence, "issue": issue,
+    }
+
+
+def _evidence_allowed_for_batch_result(evidence: Dict[str, Any], batch_id: str, req_id: str) -> bool:
+    return evidence.get("batch_id") == batch_id or evidence.get("requirement_id") == req_id
 
 
 def _validate_batch_issue(issue: Any) -> None:
     if not isinstance(issue, dict):
-        raise ValueError("violated batch result requires issue")
+        raise ValueError("partial or violated batch result requires issue")
     title = str(issue.get("title") or "").strip()
     if not title:
         raise ValueError("issue title is required")
@@ -1356,7 +1532,7 @@ def _persist_pack_result(workspace: Path, state: Dict[str, Any], result: Dict[st
     status = result["status"]
     proposed_status = {"covered": "covered", "partial": "partial", "violated": "violated", "unknown": "unknown"}[status]
     issue = None
-    if status == "violated":
+    if status in {"partial", "violated"}:
         raw_issue = result.get("issue") or {}
         issue = {
             "title": raw_issue.get("title") or "Spec-code mismatch",
@@ -1370,7 +1546,11 @@ def _persist_pack_result(workspace: Path, state: Dict[str, Any], result: Dict[st
         "requirement_id": req_id, "proposed_status": proposed_status, "reasoning": result["summary"],
         "query_ids": sorted(
             item["query_id"] for item in _jsonl_map(workspace / "queries.jsonl", "query_id").values()
-            if item["requirement_id"] == req_id and item["role"] == "investigator"
+            if item["role"] == "investigator"
+            and (
+                item["requirement_id"] == req_id
+                or (state.get("active_batch_id") and item.get("batch_id") == state.get("active_batch_id"))
+            )
         ),
         "evidence_ids": result.get("evidence_ids") or [], "counterexample_query_ids": [],
         "claim_scope": "batch_result", "unresolved_questions": [] if status != "unknown" else [reason],
@@ -1732,11 +1912,59 @@ def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
 
 @contextmanager
-def _audit_lock(workspace: Path):
+def _audit_lock(workspace: Path, timeout: float = 30.0):
     workspace.mkdir(parents=True, exist_ok=True)
-    with (workspace / ".audit.lock").open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    lock_path = workspace / ".audit.lock"
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0 and lock_path.stat().st_size == 0:
+            handle.write(b"0")
+            handle.flush()
+        _lock_file(handle, timeout=timeout)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
+
+
+def _lock_file(handle, *, timeout: float = 30.0) -> None:
+    if os.name == "nt":
+        _lock_file_windows(handle, timeout=timeout)
+    else:
+        _lock_file_posix(handle)
+
+
+def _unlock_file(handle) -> None:
+    if os.name == "nt":
+        _unlock_file_windows(handle)
+    else:
+        _unlock_file_posix(handle)
+
+
+def _lock_file_posix(handle) -> None:
+    import fcntl
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file_posix(handle) -> None:
+    import fcntl
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_file_windows(handle, *, timeout: float = 30.0) -> None:
+    import msvcrt
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out acquiring audit lock") from exc
+            time.sleep(0.05)
+
+
+def _unlock_file_windows(handle) -> None:
+    import msvcrt
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)

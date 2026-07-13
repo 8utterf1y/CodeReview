@@ -6,6 +6,11 @@ from unittest import mock
 import urllib.error
 
 from specdiff.audit_runtime import (
+    _audit_lock,
+    _lock_file_posix,
+    _lock_file_windows,
+    _unlock_file_posix,
+    _unlock_file_windows,
     assemble_result,
     audit_status,
     code_query,
@@ -76,6 +81,61 @@ class AuditRuntimeTests(unittest.TestCase):
         query = code_query(self.workspace, "REQ-1", "investigator", "defs", query="handle_error")
         self.assertEqual(query["mode"], "symbol")
         self.assertEqual(query["parameters"]["requested_mode"], "defs")
+
+    def test_audit_lock_creates_lock_byte(self):
+        lock_workspace = Path(self.temp.name) / "lock-workspace"
+        with _audit_lock(lock_workspace):
+            self.assertGreaterEqual((lock_workspace / ".audit.lock").stat().st_size, 1)
+
+    def test_posix_lock_backend_enters_and_releases(self):
+        calls = []
+
+        class FakeFcntl:
+            LOCK_EX = 1
+            LOCK_UN = 2
+
+            def flock(self, _fd, operation):
+                calls.append(operation)
+
+        with mock.patch.dict("sys.modules", {"fcntl": FakeFcntl()}):
+            with tempfile.TemporaryFile() as handle:
+                _lock_file_posix(handle)
+                _unlock_file_posix(handle)
+
+        self.assertEqual(calls, [FakeFcntl.LOCK_EX, FakeFcntl.LOCK_UN])
+
+    def test_windows_lock_backend_uses_msvcrt_locking(self):
+        calls = []
+
+        class FakeMsvcrt:
+            LK_NBLCK = 10
+            LK_UNLCK = 11
+
+            def locking(self, _fd, mode, nbytes):
+                calls.append((mode, nbytes))
+
+        fake = FakeMsvcrt()
+        with mock.patch.dict("sys.modules", {"msvcrt": fake}):
+            with tempfile.TemporaryFile() as handle:
+                _lock_file_windows(handle, timeout=0.1)
+                _unlock_file_windows(handle)
+
+        self.assertEqual(calls, [(fake.LK_NBLCK, 1), (fake.LK_UNLCK, 1)])
+
+    def test_windows_lock_contention_times_out(self):
+        class BusyMsvcrt:
+            LK_NBLCK = 10
+            LK_UNLCK = 11
+
+            def locking(self, _fd, _mode, _nbytes):
+                raise OSError("busy")
+
+        with mock.patch.dict("sys.modules", {"msvcrt": BusyMsvcrt()}):
+            with mock.patch("specdiff.audit_runtime.time.monotonic", side_effect=[0.0, 1.0]):
+                with mock.patch("specdiff.audit_runtime.time.sleep"):
+                    with tempfile.TemporaryFile() as handle:
+                        with self.assertRaises(TimeoutError):
+                            _lock_file_windows(handle, timeout=0.1)
 
     def test_reference_inventory_is_not_an_audit_requirement(self):
         reference_doc = Path(self.temp.name) / "references.md"
@@ -424,7 +484,45 @@ class AuditRuntimeTests(unittest.TestCase):
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "investigate_batch")
         self.assertEqual(set(action["batch"]["requirement_ids"]), {"PACK-A", "PACK-B"})
-        self.assertEqual(action["batch"]["group_key"], "RFC2710|4|mld")
+        self.assertNotIn("|4|", action["batch"]["group_key"])
+
+    def test_budgeted_batch_planner_caps_large_pack_sets(self):
+        root = Path(self.temp.name)
+        reqs = root / "many-batch-reqs.json"
+        rows = []
+        for index in range(80):
+            topic = "retry" if index % 2 == 0 else "handler"
+            rows.append({
+                "id": f"PACK-{index:03d}", "document": f"RFC {6000 + index}",
+                "section": f"{index}.1", "quote": f"The service MUST {topic}.",
+                "normalized": f"The service {topic}s.", "keywords": [topic],
+            })
+        reqs.write_text(json.dumps({"requirements": rows}), encoding="utf-8")
+        workspace = root / "many-batches"
+        init_audit(self.repo, reqs, workspace)
+        batches = json.loads((workspace / "batches.json").read_text())["batches"]
+        self.assertLessEqual(len(batches), 30)
+
+    def test_code_affinity_groups_different_sections_by_locality(self):
+        root = Path(self.temp.name)
+        repo = root / "affinity-repo"
+        (repo / "src" / "net").mkdir(parents=True)
+        (repo / "src" / "net" / "mld.c").write_text(
+            "void mld_report(void) {}\nvoid mld_delay(void) {}\n",
+            encoding="utf-8",
+        )
+        reqs = root / "affinity-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "RFC 2710", "section": "4.1", "quote": "MLD MUST report.", "normalized": "MLD reports.", "keywords": ["mld_report"]},
+            {"id": "PACK-B", "document": "RFC 2710", "section": "7.9", "quote": "MLD MUST delay.", "normalized": "MLD delays.", "keywords": ["mld_delay"]},
+        ]}), encoding="utf-8")
+        workspace = root / "affinity-audit"
+        init_audit(repo, reqs, workspace)
+        batch = json.loads((workspace / "batches.json").read_text())["batches"][0]
+        self.assertEqual(set(batch["requirement_ids"]), {"PACK-A", "PACK-B"})
+        self.assertIn("src/net", batch["code_hints"]["components"])
+        action = next_action(workspace)
+        self.assertNotIn("normalized", action["batch"]["requirements"][0])
 
     def test_batch_partial_submit_missing_pack_becomes_unknown_and_finishes(self):
         root = Path(self.temp.name)
@@ -451,6 +549,100 @@ class AuditRuntimeTests(unittest.TestCase):
         payload = json.loads(out.read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
         self.assertEqual(payload["unverified_requirements"][0]["requirement_id"], "PACK-B")
+
+    def test_batch_scoped_evidence_can_be_reused_across_packs(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-evidence-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler MUST retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-evidence"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        evidence_ids = query["evidence_ids"]
+        result = submit_batch_results(workspace, self._payload("batch-shared-evidence.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {"requirement_id": "PACK-A", "status": "covered", "summary": "Shared retry evidence.", "spec_clause_ids": [], "evidence_ids": evidence_ids, "confidence": 0.8},
+                {"requirement_id": "PACK-B", "status": "covered", "summary": "Same implementation path.", "spec_clause_ids": [], "evidence_ids": evidence_ids, "confidence": 0.75},
+            ],
+        }))
+        self.assertEqual(len(result["accepted_results"]), 2)
+        self.assertEqual(result["rejected_results"], [])
+
+    def test_batch_query_budget_limits_broad_text_search(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-budget-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler MUST retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-budget"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        for index in range(6):
+            code_query(workspace, action["batch_id"], "investigator", "concept", query=f"retry|schedule_retry|handle_error|{index}")
+        with self.assertRaisesRegex(ValueError, "batch text query budget exceeded"):
+            code_query(workspace, action["batch_id"], "investigator", "concept", query="one_more_text_query")
+
+    def test_invalid_batch_result_does_not_reject_valid_results(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-invalid-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler MUST retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-invalid"
+        out = root / "batch-invalid.json"
+        init_audit(self.repo, reqs, workspace, out)
+        action = next_action(workspace)
+        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        result = submit_batch_results(workspace, self._payload("batch-invalid-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {"requirement_id": "PACK-A", "status": "covered", "summary": "Valid.", "spec_clause_ids": [], "evidence_ids": query["evidence_ids"], "confidence": 0.8},
+                {"requirement_id": "PACK-B", "status": "covered", "summary": "Invalid evidence.", "spec_clause_ids": [], "evidence_ids": ["E-NOPE"], "confidence": 0.8},
+            ],
+        }))
+        self.assertEqual([item["requirement_id"] for item in result["accepted_results"]], ["PACK-A"])
+        self.assertEqual(result["rejected_results"][0]["requirement_id"], "PACK-B")
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        finish_audit(workspace)
+        payload = json.loads(out.read_text())
+        self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
+
+    def test_partial_batch_result_outputs_issue(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-partial-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler SHOULD retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-partial"
+        out = root / "batch-partial.json"
+        init_audit(self.repo, reqs, workspace, out)
+        action = next_action(workspace)
+        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        submit_batch_results(workspace, self._payload("batch-partial-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {
+                    "requirement_id": "PACK-A", "status": "partial",
+                    "summary": "Retry path exists but behavior is incomplete.",
+                    "spec_clause_ids": [], "evidence_ids": query["evidence_ids"], "confidence": 0.7,
+                    "issue": {"title": "Retry behavior is partial", "severity": "medium"},
+                },
+                {"requirement_id": "PACK-B", "status": "unknown", "summary": "Not investigated.", "spec_clause_ids": [], "evidence_ids": [], "confidence": 0.1},
+            ],
+        }))
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        finish_audit(workspace)
+        payload = json.loads(out.read_text())
+        self.assertEqual(payload["coverage_summary"]["status_counts"], {"partial": 1, "unknown": 1})
+        self.assertEqual(payload["issues"][0]["requirement_id"], "PACK-A")
+        self.assertTrue(out.with_suffix(".sarif").exists())
 
     def test_failed_review_can_continue(self):
         root = Path(self.temp.name)
