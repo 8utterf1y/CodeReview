@@ -17,6 +17,7 @@ permission:
   audit_finish: deny
   frame_obligations: allow
   code_search: allow
+  submit_batch_results: allow
   submit_conclusion: allow
   submit_investigation: deny
   submit_review: deny
@@ -25,6 +26,15 @@ permission:
 # Code Investigator
 
 Work only on the current Requirement Pack and follow the supplied `next_action`.
+
+When `next_action` is `investigate_batch`:
+
+- Investigate only the supplied `batch`.
+- Reuse code context across the batch; do not restart from scratch for each Pack.
+- Use `code_search` for code evidence.
+- Submit one `submit_batch_results` call with one result per Pack you can answer.
+- If a Pack cannot be decided, submit `unknown` with a concise reason.
+- Do not invent requirement IDs, clause IDs, evidence IDs, paths, or line numbers.
 
 When `next_action` is `frame_obligations`:
 

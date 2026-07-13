@@ -44,9 +44,12 @@ def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Option
         "requirements_sha256": _sha256_json(locked), "code_revision": repository["revision"],
         "stage": "investigating", "assembly_allowed": False,
         "requirements": {item["id"]: {"investigation": "pending", "verification": "pending"} for item in requirements},
+        "batch_cursor": 0, "active_batch_id": None, "batch_mode": len(requirements) > 1,
         "counters": {"query": 0, "evidence": 0, "action": 0}, "created_at": _now(), "updated_at": _now(),
     }
     _write_json(workspace / "audit-state.json", state)
+    if len(requirements) > 1:
+        _write_json(workspace / "batches.json", {"schema_version": "1.0", "batches": _build_audit_batches(workspace, requirements)})
     _write_json(workspace / "actions.json", {"schema_version": "1.0", "actions": []})
     _write_json(workspace / "investigation-drafts.json", {"schema_version": "1.0", "drafts": []})
     _write_json(workspace / "investigations.json", {"schema_version": "1.0", "investigations": []})
@@ -87,9 +90,29 @@ def next_action(workspace: Path) -> Dict[str, Any]:
     """Return one deterministic workflow instruction for the thin orchestrator."""
     with _audit_lock(workspace):
         state = _state(workspace)
-        action = _next_action_locked(workspace, state)
+        if state.get("batch_mode") and (workspace / "batches.json").exists():
+            action = _next_batch_action_locked(workspace, state)
+        else:
+            action = _next_action_locked(workspace, state)
         _save_state(workspace, state)
         return action
+
+
+def submit_batch_results(workspace: Path, payload_path: Path) -> Dict[str, Any]:
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        payload = _load_json(payload_path)
+        batch_id = str(payload.get("batch_id") or payload.get("batchId") or "")
+        active = state.get("active_batch_id")
+        if not active or batch_id != active:
+            raise ValueError(f"batch submission rejected: active batch is {active}, got {batch_id}")
+        batch = _batch_by_id(workspace, batch_id)
+        results = _validate_batch_results(workspace, batch, payload.get("results") or [])
+        for result in results:
+            _persist_pack_result(workspace, state, result, reason=result.get("summary") or "batch result submitted")
+        _refresh_stage(state)
+        _save_state(workspace, state)
+        return {"accepted": True, "batch_id": batch_id, "results": len(results), "next": "call_audit_next"}
 
 
 def dispatch_result(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -461,7 +484,7 @@ def _code_query(
     _require_requirement(state, requirement_id)
     if role not in {"investigator", "verifier"}:
         raise ValueError("role must be investigator or verifier")
-    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "pending":
+    if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "pending" and not _requirement_in_active_batch(workspace, state, requirement_id):
         raise ValueError("code_search rejected: current investigation phase is pending; call frame_obligations first")
     if role == "investigator" and state["requirements"][requirement_id]["investigation"] == "submitted":
         raise ValueError("code_search rejected: investigation is already submitted")
@@ -630,7 +653,7 @@ def _assemble_result(workspace: Path, out: Path) -> Dict[str, Any]:
             "investigation": investigation, "verification": verification,
         }
         records.append(record)
-        if status in {"violated", "partial"} and verification["verdict"] == "accepted" and investigation.get("issue"):
+        if status in {"violated", "partial"} and verification_ok and investigation.get("issue"):
             issues.append(_assemble_issue(len(issues) + 1, req, investigation, verification, evidence_map))
         if status in {"unknown", "no_evidence_found", "non_verifiable"} or not verification_ok:
             reason = verification["reasoning"] if not verification_ok else investigation.get("reasoning")
@@ -1143,6 +1166,223 @@ def _validate_verification_check(check: Any) -> None:
         raise ValueError("verification check evidence_ids must be an array")
 
 
+def _next_batch_action_locked(workspace: Path, state: Dict[str, Any]) -> Dict[str, Any]:
+    _finalize_active_batch(workspace, state)
+    batches = _load_json(workspace / "batches.json")["batches"]
+    cursor = int(state.get("batch_cursor") or 0)
+    if cursor < len(batches):
+        batch = batches[cursor]
+        state["batch_cursor"] = cursor + 1
+        state["active_batch_id"] = batch["batch_id"]
+        return {"next_action": "investigate_batch", "batch": batch, "batch_id": batch["batch_id"]}
+    _refresh_stage(state)
+    if state["assembly_allowed"]:
+        return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
+    return {"next_action": "blocked", "reason": "batch audit state has no runnable transition", "status": audit_status(workspace)}
+
+
+def _finalize_active_batch(workspace: Path, state: Dict[str, Any]) -> None:
+    batch_id = state.get("active_batch_id")
+    if not batch_id:
+        return
+    batch = _batch_by_id(workspace, batch_id)
+    for req_id in batch["requirement_ids"]:
+        if state["requirements"][req_id]["investigation"] != "submitted":
+            _persist_pack_result(
+                workspace, state,
+                {
+                    "requirement_id": req_id, "status": "unknown",
+                    "summary": "batch_agent_failed_or_result_missing",
+                    "evidence_ids": [], "spec_clause_ids": [], "confidence": 0.0,
+                },
+                reason="batch_agent_failed_or_result_missing",
+            )
+    state["active_batch_id"] = None
+    _refresh_stage(state)
+
+
+def _build_audit_batches(workspace: Path, requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for req in requirements:
+        grouped.setdefault(_batch_group_key(req), []).append(req)
+    batches: List[Dict[str, Any]] = []
+    for key in sorted(grouped):
+        rows = grouped[key]
+        chunk: List[Dict[str, Any]] = []
+        clause_count = 0
+        for req in rows:
+            req_clauses = len(req.get("clause_ids") or []) or 1
+            if chunk and (len(chunk) >= 6 or clause_count + req_clauses > 40):
+                batches.append(_make_batch(workspace, len(batches) + 1, key, chunk))
+                chunk, clause_count = [], 0
+            chunk.append(req)
+            clause_count += req_clauses
+        if chunk:
+            batches.append(_make_batch(workspace, len(batches) + 1, key, chunk))
+    return batches
+
+
+def _batch_group_key(req: Dict[str, Any]) -> str:
+    document = re.sub(r"[^A-Za-z0-9]+", "", str(req.get("document") or "DOC")).upper() or "DOC"
+    section = str(req.get("section") or "unknown")
+    section_prefix = ".".join(re.findall(r"\d+", section)[:1]) or "unknown"
+    family = _protocol_family(req)
+    return f"{document}|{section_prefix}|{family}"
+
+
+def _protocol_family(req: Dict[str, Any]) -> str:
+    text = " ".join(
+        [str(req.get("normalized") or ""), str(req.get("quote") or "")]
+        + [str(item) for item in req.get("keywords") or []]
+    ).lower()
+    families = [
+        ("mld", ("mld", "multicast listener")),
+        ("nd6", ("neighbor", "nd6", "router advertisement", "neighbour", "solicitation")),
+        ("icmp6", ("icmpv6", "icmp6")),
+        ("dhcp6", ("dhcpv6", "dhcp6")),
+        ("frag", ("fragment", "reassembly")),
+        ("socket", ("socket", "setsockopt", "recvmsg", "sendmsg")),
+        ("addr", ("address", "slaac", "autoconf")),
+        ("ip6", ("ipv6", "extension header", "flow label")),
+    ]
+    for name, terms in families:
+        if any(term in text for term in terms):
+            return name
+    return "general"
+
+
+def _make_batch(workspace: Path, index: int, key: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    hints = {"components": [], "symbols": [], "source": "sqlite_codefacts"}
+    components: Counter[str] = Counter()
+    symbols: Counter[str] = Counter()
+    for req in rows:
+        req_hints = _code_hints_for_requirement(workspace, req)
+        for component in req_hints.get("components") or []:
+            components[component] += 1
+        for symbol in req_hints.get("symbols") or []:
+            symbols[symbol] += 1
+    hints["components"] = [item for item, _count in components.most_common(8)]
+    hints["symbols"] = [item for item, _count in symbols.most_common(16)]
+    return {
+        "batch_id": f"BATCH-{index:04d}",
+        "topic": f"BATCH-{key.replace('|', '-')}-{index:04d}",
+        "group_key": key,
+        "requirement_ids": [req["id"] for req in rows],
+        "requirements": rows,
+        "code_hints": hints,
+        "limits": {"max_packs": 6, "max_clauses": 40},
+    }
+
+
+def _batch_by_id(workspace: Path, batch_id: str) -> Dict[str, Any]:
+    batch = next((item for item in _load_json(workspace / "batches.json")["batches"] if item["batch_id"] == batch_id), None)
+    if not batch:
+        raise ValueError(f"unknown batch id: {batch_id}")
+    return batch
+
+
+def _requirement_in_active_batch(workspace: Path, state: Dict[str, Any], req_id: str) -> bool:
+    batch_id = state.get("active_batch_id")
+    if not batch_id:
+        return False
+    return req_id in set(_batch_by_id(workspace, batch_id)["requirement_ids"])
+
+
+def _validate_batch_results(workspace: Path, batch: Dict[str, Any], rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        raise ValueError("batch results must be an array")
+    allowed = set(batch["requirement_ids"])
+    requirements = {item["id"]: item for item in batch["requirements"]}
+    evidence = _jsonl_map(workspace / "evidence.jsonl", "evidence_id")
+    seen = set()
+    results = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"results[{index}] must be an object")
+        req_id = str(row.get("requirement_id") or row.get("requirementId") or "")
+        if req_id not in allowed:
+            raise ValueError(f"results[{index}] requirement_id is not in current batch: {req_id}")
+        if req_id in seen:
+            raise ValueError(f"duplicate batch result for {req_id}")
+        seen.add(req_id)
+        status = str(row.get("status") or "")
+        if status not in {"covered", "partial", "violated", "unknown"}:
+            raise ValueError("batch result status must be covered, partial, violated, or unknown")
+        summary = str(row.get("summary") or "").strip()
+        if not summary:
+            raise ValueError(f"{req_id}: summary is required")
+        evidence_ids = row.get("evidence_ids") if "evidence_ids" in row else row.get("evidenceIds")
+        evidence_ids = evidence_ids or []
+        if not isinstance(evidence_ids, list):
+            raise ValueError(f"{req_id}: evidence_ids must be an array")
+        for evidence_id in evidence_ids:
+            item = evidence.get(evidence_id)
+            if not item or item["requirement_id"] != req_id:
+                raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
+        spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
+        spec_clause_ids = spec_clause_ids or []
+        allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
+        if not isinstance(spec_clause_ids, list) or not set(spec_clause_ids).issubset(allowed_clauses):
+            raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
+        issue = row.get("issue")
+        if status == "violated":
+            _validate_batch_issue(issue)
+        confidence = row.get("confidence", 0.5)
+        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1:
+            raise ValueError(f"{req_id}: confidence must be between 0 and 1")
+        results.append({
+            "requirement_id": req_id, "status": status, "summary": summary,
+            "spec_clause_ids": spec_clause_ids, "evidence_ids": evidence_ids,
+            "confidence": confidence, "issue": issue,
+        })
+    return results
+
+
+def _validate_batch_issue(issue: Any) -> None:
+    if not isinstance(issue, dict):
+        raise ValueError("violated batch result requires issue")
+    title = str(issue.get("title") or "").strip()
+    if not title:
+        raise ValueError("issue title is required")
+    severity = issue.get("severity") or "medium"
+    if severity not in {"critical", "high", "medium", "low"}:
+        raise ValueError("invalid issue severity")
+
+
+def _persist_pack_result(workspace: Path, state: Dict[str, Any], result: Dict[str, Any], *, reason: str) -> None:
+    req_id = result["requirement_id"]
+    if state["requirements"][req_id]["investigation"] == "submitted":
+        return
+    status = result["status"]
+    proposed_status = {"covered": "covered", "partial": "partial", "violated": "violated", "unknown": "unknown"}[status]
+    issue = None
+    if status == "violated":
+        raw_issue = result.get("issue") or {}
+        issue = {
+            "title": raw_issue.get("title") or "Spec-code mismatch",
+            "description": result["summary"],
+            "match_type": raw_issue.get("match_type") or "mismatch",
+            "severity": raw_issue.get("severity") or "medium",
+            "confidence": result.get("confidence", 0.5),
+        }
+        _validate_issue(issue)
+    canonical = {
+        "requirement_id": req_id, "proposed_status": proposed_status, "reasoning": result["summary"],
+        "query_ids": sorted(
+            item["query_id"] for item in _jsonl_map(workspace / "queries.jsonl", "query_id").values()
+            if item["requirement_id"] == req_id and item["role"] == "investigator"
+        ),
+        "evidence_ids": result.get("evidence_ids") or [], "counterexample_query_ids": [],
+        "claim_scope": "batch_result", "unresolved_questions": [] if status != "unknown" else [reason],
+        "issue": issue, "agent_conclusion": status, "negative_checks": [],
+        "obligations": [], "obligation_results": [], "findings": [],
+        "spec_clause_ids": result.get("spec_clause_ids") or [],
+        "confidence": result.get("confidence", 0.5), "submitted_at": _now(),
+    }
+    _transition(state, req_id, "investigation_failed" if status == "unknown" else "batch_result_submitted")
+    _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
+
+
 def _next_action_locked(workspace: Path, state: Dict[str, Any]) -> Dict[str, Any]:
     applied = _apply_terminal_fallbacks(workspace, state)
     outstanding = _outstanding_dispatched_action(workspace)
@@ -1318,6 +1558,11 @@ def _transition(state: Dict[str, Any], req_id: str, event: str, *, verification:
         item["investigation"] = "submitted"
         item["verification"] = verification
     elif event == "investigation_failed":
+        if item["investigation"] not in {"pending", "framed"}:
+            raise ValueError(f"invalid transition {event} from investigation={item['investigation']}")
+        item["investigation"] = "submitted"
+        item["verification"] = "not_required"
+    elif event == "batch_result_submitted":
         if item["investigation"] not in {"pending", "framed"}:
             raise ValueError(f"invalid transition {event} from investigation={item['investigation']}")
         item["investigation"] = "submitted"

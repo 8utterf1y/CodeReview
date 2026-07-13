@@ -14,28 +14,17 @@ repo + docs + out
   -> Requirement Pack Builder
   -> Code Facts SQLite index
   -> audit_next
-  -> Code Investigator frames obligations
-  -> frame_obligations
-  -> audit_dispatch_result
-  -> audit_next
-  -> Code Investigator searches evidence
-  -> submit_conclusion
-  -> audit_dispatch_result
-  -> Evidence Reviewer only for mismatch candidates
-  -> audit_dispatch_result
+  -> Batch Planner
+  -> Code Investigator investigates one batch
+  -> submit_batch_results
+  -> audit_next fills missing Pack results as unknown
   -> audit_finish
   -> issues.json + SARIF
 ```
 
 The program controls state, evidence IDs, schema validation, mismatch gates, and final assembly. Agents only
-investigate the bounded Requirement Pack they receive and submit typed results through tools.
-Subagent completion is never inferred from natural language. `audit_dispatch_result` verifies the expected
-state transition and either retries once or finalizes the failed action as unknown so the audit can continue.
-Each dispatched worker task is recorded in `actions.json` with `action_id`, action type, requirement ID,
-attempt, expected before/after state, status, and error. Supported lifecycle states are `created`,
-`dispatched`, `committed`, `failed`, and `failed_terminal`.
-`audit_dispatch_result` is a postcondition checker only: it marks action state but does not write investigations,
-reviews, or requirement state. Terminal fallback is applied by the next `audit_next` call.
+investigate the bounded batch they receive and submit typed per-Pack results through tools. Pack remains the
+result and coverage unit; Batch is only the Agent dispatch unit.
 
 ## 3. RFC Handling
 
@@ -64,15 +53,9 @@ only. There is no ctags, CodeQL, Joern, SCIP, or Semgrep backend in the current 
 
 ## 5. Mismatch Gate
 
-Before a mismatch can reach the lightweight Reviewer, `frame_obligations` first stores program-controlled
-obligations with stable IDs. `submit_conclusion` then enforces structured evidence, all obligation results, and
-minimum negative checks. Missing-capability claims require checks for symbol/file search, alternative naming,
-build/configuration, and responsibility. Behavior mismatch claims require an alternative-implementation check.
-Every searched negative check must cite the `query_id` that produced it.
-
-`frame_obligations`, `submit_conclusion`, and `submit_review` validate schema, references, and policy before
-writing canonical artifacts. State transitions are centralized in the audit runtime; failed validation does not
-modify requirement state.
+`submit_batch_results` validates that every result belongs to the active batch, each Pack appears at most once,
+clause IDs belong to that Pack, evidence IDs belong to that Pack, and violated results include an issue.
+If the Agent omits a Pack, the next `audit_next` writes an `unknown` result for that Pack and continues.
 
 The Reviewer does not search the repository. It only checks whether the supplied spec evidence, code evidence,
 and reasoning support the mismatch. Only accepted mismatch or partial findings are assembled into final issues.

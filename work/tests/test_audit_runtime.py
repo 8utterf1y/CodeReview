@@ -14,6 +14,7 @@ from specdiff.audit_runtime import (
     init_audit,
     finish_audit,
     next_action,
+    submit_batch_results,
     submit_conclusion,
     submit_simple_investigation,
     submit_simple_review,
@@ -339,6 +340,9 @@ class AuditRuntimeTests(unittest.TestCase):
         ]}), encoding="utf-8")
         workspace = root / "dispatch-two-reqs"
         init_audit(self.repo, reqs, workspace)
+        state = json.loads((workspace / "audit-state.json").read_text())
+        state["batch_mode"] = False
+        (workspace / "audit-state.json").write_text(json.dumps(state), encoding="utf-8")
         self._frame_default(workspace, "REQ-A")
         action = next_action(workspace)
         first = dispatch_result(workspace, self._payload("dispatch-investigate-first.json", {
@@ -407,6 +411,46 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertTrue(second["idempotent"])
         investigations = json.loads((workspace / "investigations.json").read_text())["investigations"]
         self.assertEqual(len(investigations), 1)
+
+    def test_batch_planner_groups_multiple_packs(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "RFC 2710", "section": "4.1", "quote": "MLD listener MUST report.", "normalized": "MLD listener reports.", "keywords": ["mld"]},
+            {"id": "PACK-B", "document": "RFC 2710", "section": "4.2", "quote": "MLD listener MUST delay.", "normalized": "MLD listener delays.", "keywords": ["mld"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-plan"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        self.assertEqual(action["next_action"], "investigate_batch")
+        self.assertEqual(set(action["batch"]["requirement_ids"]), {"PACK-A", "PACK-B"})
+        self.assertEqual(action["batch"]["group_key"], "RFC2710|4|mld")
+
+    def test_batch_partial_submit_missing_pack_becomes_unknown_and_finishes(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-missing-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "RFC 2710", "section": "4.1", "quote": "MLD listener MUST report.", "normalized": "MLD listener reports.", "keywords": ["mld"]},
+            {"id": "PACK-B", "document": "RFC 2710", "section": "4.2", "quote": "MLD listener MUST delay.", "normalized": "MLD listener delays.", "keywords": ["mld"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-missing"
+        out = root / "batch-missing.json"
+        init_audit(self.repo, reqs, workspace, out)
+        action = next_action(workspace)
+        query = code_query(workspace, "PACK-A", "investigator", "concept", query="schedule_retry")
+        submit_batch_results(workspace, self._payload("batch-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [{
+                "requirement_id": "PACK-A", "status": "covered",
+                "summary": "PACK-A has evidence.", "spec_clause_ids": [],
+                "evidence_ids": query["evidence_ids"], "confidence": 0.8,
+            }],
+        }))
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        finish_audit(workspace)
+        payload = json.loads(out.read_text())
+        self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
+        self.assertEqual(payload["unverified_requirements"][0]["requirement_id"], "PACK-B")
 
     def test_failed_review_can_continue(self):
         root = Path(self.temp.name)
@@ -754,8 +798,8 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "cap-audit"
         init_audit(self.repo, requirements, workspace)
         action = next_action(workspace)
-        self.assertEqual(action["next_action"], "frame_obligations")
-        self.assertTrue(action["requirement_pack"]["id"].startswith("PACK-RFC4000"))
+        self.assertEqual(action["next_action"], "investigate_batch")
+        self.assertTrue(action["batch"]["requirement_ids"][0].startswith("PACK-RFC4000"))
 
     def test_corpus_compression_and_determinism(self):
         root = Path(self.temp.name)

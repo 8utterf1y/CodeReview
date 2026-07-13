@@ -52,10 +52,10 @@ agents investigate and verify through typed tools:
 
 1. load explicit requirements or compile an RFC inventory into Requirement Packs,
 2. build SQLite Code Facts with Aider Tree-sitter tags,
-3. frame 1-3 implementation obligations for each Requirement Pack,
-4. investigate those obligations using controlled `code_search` queries,
-5. validate each subagent dispatch with `audit_dispatch_result`,
-6. review mismatch evidence once with a lightweight Reviewer,
+3. group related Requirement Packs into small Audit Batches,
+4. investigate one batch per Investigator call using controlled `code_search` queries,
+5. persist per-Pack results through `submit_batch_results`,
+6. fill missing Pack results as `unknown` when a batch returns incomplete,
 7. assemble machine-readable findings programmatically.
 
 Every subagent dispatch is an Action with lifecycle `dispatched -> committed`, `failed`, or
@@ -71,6 +71,7 @@ Primary artifacts:
 - `tools/audit_next.ts`
 - `tools/audit_dispatch_result.ts`
 - `tools/code_search.ts`
+- `tools/submit_batch_results.ts`
 - `tools/frame_obligations.ts`
 - `tools/submit_conclusion.ts`
 - `tools/submit_review.ts`

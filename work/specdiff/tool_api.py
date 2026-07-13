@@ -20,6 +20,7 @@ from .audit_runtime import (
     next_action,
     review_bundle,
     submit_conclusion,
+    submit_batch_results,
     submit_simple_investigation,
     submit_simple_review,
     submit_investigation,
@@ -118,6 +119,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--payload", required=True)
 
     p = sub.add_parser("audit-submit-conclusion")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--payload", required=True)
+
+    p = sub.add_parser("audit-submit-batch-results")
     p.add_argument("--workspace", required=True)
     p.add_argument("--payload", required=True)
 
@@ -232,6 +237,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _emit(frame_obligations(Path(args.workspace), Path(args.payload)))
         if args.cmd == "audit-submit-conclusion":
             return _emit(submit_conclusion(Path(args.workspace), Path(args.payload)))
+        if args.cmd == "audit-submit-batch-results":
+            return _emit(submit_batch_results(Path(args.workspace), Path(args.payload)))
         if args.cmd == "audit-submit-simple-investigation":
             return _emit(submit_simple_investigation(Path(args.workspace), Path(args.payload)))
         if args.cmd == "audit-submit-simple-review":

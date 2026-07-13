@@ -17,18 +17,12 @@ manual step.
 The Python program owns requirements, repository indexing, workflow transitions, query/evidence IDs, gates,
 and final assembly. Agents never edit controlled artifacts.
 
-1. `audit_start` locks requirements or Requirement Packs, builds/reuses Code Facts, and returns one `next_action`.
-2. For `frame_obligations`, the Orchestrator passes the supplied `requirement_pack` unchanged to
-   `code-investigator`.
-3. Investigator calls `frame_obligations` with 1-3 implementation obligations derived only from supplied
-   clause IDs. It must not search code in this phase.
-4. For `investigate`, Investigator uses `code_search` against the program-stored obligations and submits
-   `satisfied`, `mismatch`, or `uncertain` through `submit_conclusion`.
-5. After every subagent return, Orchestrator calls `audit_dispatch_result` for the same requirement and action.
-   Only the runtime may decide retry or fallback.
-6. The program requests `evidence-reviewer` only for mismatch conclusions.
-7. Reviewer checks the supplied packet once and submits `accept`, `reject`, or `uncertain`; it does not search.
-8. `audit_next` supplies every transition. `audit_finish` alone writes JSON and SARIF.
+1. `audit_start` locks requirements or Requirement Packs, builds/reuses Code Facts, builds Audit Batches, and
+   returns one `next_action`.
+2. For `investigate_batch`, the Orchestrator passes the supplied batch unchanged to `code-investigator`.
+3. Investigator uses `code_search` and submits per-Pack results through `submit_batch_results`.
+4. If a batch returns incomplete, the next `audit_next` fills missing Pack results as `unknown`.
+5. `audit_finish` alone writes JSON and SARIF.
 
 Each `audit_next` worker packet contains an `action_id`. Pass that same `action_id` to `audit_dispatch_result`.
 Do not reuse an old action ID after the runtime returns a retry packet.
