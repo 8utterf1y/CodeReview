@@ -9,6 +9,7 @@ from specdiff.audit_runtime import (
     assemble_result,
     audit_status,
     code_query,
+    dispatch_result,
     frame_obligations,
     init_audit,
     finish_audit,
@@ -160,8 +161,12 @@ class AuditRuntimeTests(unittest.TestCase):
             "requirement_id": "REQ-1",
             "obligations": [{"description": "The implementation should retry transient failures.", "source_clause_ids": ["REQ-1"]}],
         }))
+        dispatch_result(workspace, self._payload("simple-satisfied-frame-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
+        }))
         obligation_id = framed["obligations"][0]["id"]
-        self.assertEqual(next_action(workspace)["next_action"], "investigate")
+        investigate_action = next_action(workspace)
+        self.assertEqual(investigate_action["next_action"], "investigate")
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         submit_conclusion(workspace, self._payload("simple-satisfied-submit.json", {
             "requirement_id": "REQ-1", "conclusion": "satisfied",
@@ -169,21 +174,45 @@ class AuditRuntimeTests(unittest.TestCase):
             "obligation_results": [{"obligation_id": obligation_id, "status": "supported", "evidence_ids": query["evidence_ids"]}],
             "uncertainties": [],
         }))
+        dispatch_result(workspace, self._payload("simple-satisfied-investigate-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": investigate_action["action_id"],
+        }))
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         result = finish_audit(workspace)
         self.assertTrue(result["assembled"])
         self.assertEqual(json.loads(out.read_text())["coverage_summary"]["status_counts"], {"covered": 1})
+
+    def test_next_action_finish_then_audit_finish_succeeds(self):
+        root = Path(self.temp.name)
+        workspace = root / "finish-invariant"
+        out = root / "finish-invariant.json"
+        init_audit(self.repo, self.requirements, workspace, out)
+        obligation_id = self._frame_default(workspace)
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        submit_conclusion(workspace, self._payload("finish-submit.json", {
+            "requirement_id": "REQ-1", "conclusion": "satisfied",
+            "summary": "The error handler schedules a retry.",
+            "obligation_results": [{"obligation_id": obligation_id, "status": "supported", "evidence_ids": query["evidence_ids"]}],
+            "uncertainties": [],
+        }))
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        self.assertTrue(finish_audit(workspace)["assembled"])
 
     def test_simple_workflow_mismatch_gets_one_lightweight_review(self):
         root = Path(self.temp.name)
         workspace = root / "simple-mismatch"
         out = root / "simple-mismatch.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        frame_action = next_action(workspace)
         framed = frame_obligations(workspace, self._payload("simple-mismatch-frame.json", {
             "requirement_id": "REQ-1",
             "obligations": [{"description": "Retry behavior should be absent in this mismatch fixture.", "source_clause_ids": ["REQ-1"]}],
         }))
+        dispatch_result(workspace, self._payload("simple-mismatch-frame-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": frame_action["action_id"],
+        }))
         obligation_id = framed["obligations"][0]["id"]
+        investigate_action = next_action(workspace)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         negative_query = code_query(workspace, "REQ-1", "investigator", "concept", query="alternate_retry")
         submit_conclusion(workspace, self._payload("simple-mismatch-submit.json", {
@@ -194,6 +223,9 @@ class AuditRuntimeTests(unittest.TestCase):
             "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [negative_query["query_id"]], "result": "none"}],
             "uncertainties": [],
         }))
+        dispatch_result(workspace, self._payload("simple-mismatch-investigate-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": investigate_action["action_id"],
+        }))
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "review")
         self.assertEqual(action["review_packet"]["requirement"]["id"], "REQ-1")
@@ -201,9 +233,232 @@ class AuditRuntimeTests(unittest.TestCase):
             "requirement_id": "REQ-1", "verdict": "accept",
             "reason": "The supplied source evidence supports the mismatch.", "unsupported_claims": [],
         }))
+        dispatch_result(workspace, self._payload("simple-review-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "review", "action_id": action["action_id"],
+        }))
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         finish_audit(workspace)
         self.assertEqual(len(json.loads(out.read_text())["issues"]), 1)
+
+    def test_dispatch_result_failed_when_state_unchanged(self):
+        action = next_action(self.workspace)
+        result = dispatch_result(self.workspace, self._payload("dispatch-unchanged.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
+        }))
+        self.assertEqual(result["dispatch_status"], "failed")
+        self.assertEqual(result["reason"], "state_unchanged")
+        self.assertEqual(result["expected_state"], "framed")
+        self.assertEqual(result["current_state"], "pending")
+
+    def test_dispatch_result_without_active_action_returns_structured_failure(self):
+        result = dispatch_result(self.workspace, self._payload("dispatch-missing-action.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": "A-STALE",
+        }))
+        self.assertEqual(result["dispatch_status"], "failed")
+        self.assertEqual(result["reason"], "action_not_found")
+        self.assertEqual(result["recovery_action"], "call_audit_next")
+
+    def test_committed_action_repeated_dispatch_result_is_idempotent(self):
+        action = next_action(self.workspace)
+        frame_obligations(self.workspace, self._payload("stale-complete-frame.json", {
+            "requirement_id": "REQ-1",
+            "obligations": [{"description": "The implementation should satisfy the requirement.", "source_clause_ids": ["REQ-1"]}],
+        }))
+        first = dispatch_result(self.workspace, self._payload("dispatch-stale-complete.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
+        }))
+        second = dispatch_result(self.workspace, self._payload("dispatch-stale-complete-again.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
+        }))
+        self.assertEqual(first["dispatch_status"], "completed")
+        self.assertEqual(second["dispatch_status"], "completed")
+        self.assertEqual(second["reason"], "already_committed")
+
+    def test_action_lifecycle_commits_after_state_transition(self):
+        action = next_action(self.workspace)
+        self.assertEqual(action["action"]["status"], "dispatched")
+        frame_obligations(self.workspace, self._payload("lifecycle-frame.json", {
+            "requirement_id": "REQ-1",
+            "obligations": [{"description": "The implementation should satisfy the requirement.", "source_clause_ids": ["REQ-1"]}],
+        }))
+        result = dispatch_result(self.workspace, self._payload("lifecycle-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
+        }))
+        self.assertEqual(result["dispatch_status"], "completed")
+        actions = json.loads((self.workspace / "actions.json").read_text())["actions"]
+        self.assertEqual(actions[0]["status"], "committed")
+        self.assertEqual(actions[0]["expected_before"], "pending")
+        self.assertEqual(actions[0]["expected_after"], "framed")
+
+    def test_conclusion_submit_then_dispatch_result_completed(self):
+        frame_action = next_action(self.workspace)
+        obligation_id = self._frame_default()
+        dispatch_result(self.workspace, self._payload("conclusion-frame-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": frame_action["action_id"],
+        }))
+        investigate_action = next_action(self.workspace)
+        query = code_query(self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        submit_conclusion(self.workspace, self._payload("conclusion-submit.json", {
+            "requirement_id": "REQ-1", "conclusion": "satisfied",
+            "summary": "The error handler schedules a retry.",
+            "obligation_results": [{"obligation_id": obligation_id, "status": "supported", "evidence_ids": query["evidence_ids"]}],
+            "uncertainties": [],
+        }))
+        result = dispatch_result(self.workspace, self._payload("conclusion-dispatch.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": investigate_action["action_id"],
+        }))
+        self.assertEqual(result["dispatch_status"], "completed")
+        self.assertEqual(result["current_state"], "submitted")
+
+    def test_audit_next_does_not_create_new_action_when_outstanding_exists(self):
+        first = next_action(self.workspace)
+        second = next_action(self.workspace)
+        actions = json.loads((self.workspace / "actions.json").read_text())["actions"]
+        self.assertEqual(second["next_action"], "awaiting_dispatch_result")
+        self.assertEqual(second["action_id"], first["action_id"])
+        self.assertEqual(len(actions), 1)
+
+    def test_first_dispatch_failure_retries_same_action(self):
+        self._frame_default()
+        action = next_action(self.workspace)
+        result = dispatch_result(self.workspace, self._payload("dispatch-retry.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": action["action_id"],
+        }))
+        self.assertEqual(result["dispatch_status"], "failed")
+        self.assertEqual(result["recovery_action"], "retry_same_action")
+        self.assertEqual(result["attempt"], 1)
+        actions = json.loads((self.workspace / "actions.json").read_text())["actions"]
+        self.assertEqual([item["status"] for item in actions[-2:]], ["failed", "dispatched"])
+
+    def test_second_investigation_failure_marks_unknown_and_continues(self):
+        root = Path(self.temp.name)
+        reqs = root / "two-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "REQ-A", "document": "spec.md", "section": "1", "quote": "A MUST retry.", "normalized": "Retry A.", "keywords": ["retry"]},
+            {"id": "REQ-B", "document": "spec.md", "section": "2", "quote": "B MUST retry.", "normalized": "Retry B.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "dispatch-two-reqs"
+        init_audit(self.repo, reqs, workspace)
+        self._frame_default(workspace, "REQ-A")
+        action = next_action(workspace)
+        first = dispatch_result(workspace, self._payload("dispatch-investigate-first.json", {
+            "requirement_id": "REQ-A", "action": "investigate", "action_id": action["action_id"],
+        }))
+        retry = first["retry_packet"]
+        second = dispatch_result(workspace, self._payload("dispatch-investigate-second.json", {
+            "requirement_id": "REQ-A", "action": "investigate", "action_id": retry["action_id"],
+        }))
+        self.assertEqual(first["recovery_action"], "retry_same_action")
+        self.assertEqual(second["dispatch_status"], "failed_finalized")
+        self.assertEqual(second["recovery_action"], "terminal_fallback")
+        action_after_fallback = next_action(workspace)
+        self.assertEqual(action_after_fallback["requirement_pack"]["id"], "REQ-B")
+        status = audit_status(workspace)
+        self.assertEqual(status["counts"]["investigation_submitted"], 1)
+
+    def test_failed_investigation_does_not_block_audit(self):
+        root = Path(self.temp.name)
+        workspace = root / "failed-investigation"
+        out = root / "failed-investigation.json"
+        init_audit(self.repo, self.requirements, workspace, out)
+        self._frame_default(workspace)
+        action = next_action(workspace)
+        dispatch_result(workspace, self._payload("failed-investigation-1.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": action["action_id"],
+        }))
+        retry = next(item for item in json.loads((workspace / "actions.json").read_text())["actions"] if item["status"] == "dispatched")
+        result = dispatch_result(workspace, self._payload("failed-investigation-2.json", {
+            "requirement_id": "REQ-1", "action": "investigate", "action_id": retry["action_id"],
+        }))
+        self.assertEqual(result["dispatch_status"], "failed_finalized")
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        assembled = finish_audit(workspace)
+        self.assertTrue(assembled["assembled"])
+        payload = json.loads(out.read_text())
+        self.assertEqual(payload["coverage_summary"]["status_counts"], {"unknown": 1})
+        self.assertEqual(payload["unverified_requirements"][0]["reason"], "investigator_failed_to_submit")
+
+    def test_validation_failure_does_not_change_business_state(self):
+        before = audit_status(self.workspace)
+        with self.assertRaisesRegex(ValueError, "source_clause_ids must belong"):
+            frame_obligations(self.workspace, self._payload("invalid-frame.json", {
+                "requirement_id": "REQ-1",
+                "obligations": [{"description": "Invalid source.", "source_clause_ids": ["OTHER"]}],
+            }))
+        after = audit_status(self.workspace)
+        self.assertEqual(before["counts"], after["counts"])
+        self.assertEqual(json.loads((self.workspace / "investigation-drafts.json").read_text())["drafts"], [])
+
+    def test_repeated_submit_conclusion_is_idempotent(self):
+        root = Path(self.temp.name)
+        workspace = root / "idempotent-submit"
+        init_audit(self.repo, self.requirements, workspace)
+        obligation_id = self._frame_default(workspace)
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        payload = {
+            "requirement_id": "REQ-1", "conclusion": "satisfied",
+            "summary": "The error handler schedules a retry.",
+            "obligation_results": [{"obligation_id": obligation_id, "status": "supported", "evidence_ids": query["evidence_ids"]}],
+            "uncertainties": [],
+        }
+        first = submit_conclusion(workspace, self._payload("idempotent-1.json", payload))
+        second = submit_conclusion(workspace, self._payload("idempotent-2.json", payload))
+        self.assertTrue(first["accepted"])
+        self.assertTrue(second["idempotent"])
+        investigations = json.loads((workspace / "investigations.json").read_text())["investigations"]
+        self.assertEqual(len(investigations), 1)
+
+    def test_failed_review_can_continue(self):
+        root = Path(self.temp.name)
+        workspace = root / "failed-review"
+        out = root / "failed-review.json"
+        init_audit(self.repo, self.requirements, workspace, out)
+        obligation_id = self._frame_default(workspace)
+        query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        negative_query = code_query(workspace, "REQ-1", "investigator", "concept", query="alternate_retry")
+        submit_conclusion(workspace, self._payload("failed-review-submit.json", {
+            "requirement_id": "REQ-1", "conclusion": "mismatch", "mismatch_kind": "contradiction",
+            "summary": "The observed behavior contradicts the requirement.", "title": "Mismatch",
+            "severity": "high", "confidence": 0.8,
+            "obligation_results": [{"obligation_id": obligation_id, "status": "contradicted", "evidence_ids": query["evidence_ids"]}],
+            "negative_checks": [{"dimension": "alternative_implementation", "status": "searched", "query_ids": [negative_query["query_id"]], "result": "none"}],
+            "uncertainties": [],
+        }))
+        self.assertEqual(next_action(workspace)["next_action"], "review")
+        dispatch_result(workspace, self._payload("failed-review-1.json", {
+            "requirement_id": "REQ-1", "action": "review",
+        }))
+        result = dispatch_result(workspace, self._payload("failed-review-2.json", {
+            "requirement_id": "REQ-1", "action": "review",
+        }))
+        self.assertEqual(result["dispatch_status"], "failed_finalized")
+        self.assertEqual(next_action(workspace)["next_action"], "finish")
+        finish_audit(workspace)
+        payload = json.loads(out.read_text())
+        self.assertEqual(payload["coverage_summary"]["status_counts"], {"unknown": 1})
+        self.assertEqual(payload["unverified_requirements"][0]["reason"], "reviewer_failed_to_submit")
+
+    def test_source_query_returns_one_evidence_span(self):
+        root = Path(self.temp.name)
+        repo = root / "span-repo"
+        repo.mkdir()
+        (repo / "foo.c").write_text("\n".join(f"int line_{index};" for index in range(1, 151)), encoding="utf-8")
+        reqs = root / "span-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [{
+            "id": "REQ-SPAN", "document": "spec.md", "section": "1",
+            "quote": "The module MUST expose a source span.", "normalized": "Expose source span.",
+            "keywords": ["source"],
+        }]}), encoding="utf-8")
+        workspace = root / "span-audit"
+        init_audit(repo, reqs, workspace)
+        self._frame_default(workspace, "REQ-SPAN")
+        query = code_query(workspace, "REQ-SPAN", "investigator", "source", path="foo.c", start=100, end=130)
+        self.assertEqual(query["result_count"], 1)
+        self.assertEqual(len(query["evidence_ids"]), 1)
+        evidence = json.loads((workspace / "evidence.jsonl").read_text().splitlines()[0])
+        self.assertEqual(evidence["start_line"], 100)
+        self.assertEqual(evidence["end_line"], 130)
+        self.assertEqual(evidence["precision"], "exact_source_span")
 
     def test_index_v1_and_controlled_assembly(self):
         self._frame_default()

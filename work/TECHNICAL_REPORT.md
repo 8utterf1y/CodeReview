@@ -16,16 +16,26 @@ repo + docs + out
   -> audit_next
   -> Code Investigator frames obligations
   -> frame_obligations
+  -> audit_dispatch_result
   -> audit_next
   -> Code Investigator searches evidence
   -> submit_conclusion
+  -> audit_dispatch_result
   -> Evidence Reviewer only for mismatch candidates
+  -> audit_dispatch_result
   -> audit_finish
   -> issues.json + SARIF
 ```
 
 The program controls state, evidence IDs, schema validation, mismatch gates, and final assembly. Agents only
 investigate the bounded Requirement Pack they receive and submit typed results through tools.
+Subagent completion is never inferred from natural language. `audit_dispatch_result` verifies the expected
+state transition and either retries once or finalizes the failed action as unknown so the audit can continue.
+Each dispatched worker task is recorded in `actions.json` with `action_id`, action type, requirement ID,
+attempt, expected before/after state, status, and error. Supported lifecycle states are `created`,
+`dispatched`, `committed`, `failed`, and `failed_terminal`.
+`audit_dispatch_result` is a postcondition checker only: it marks action state but does not write investigations,
+reviews, or requirement state. Terminal fallback is applied by the next `audit_next` call.
 
 ## 3. RFC Handling
 
@@ -59,6 +69,10 @@ obligations with stable IDs. `submit_conclusion` then enforces structured eviden
 minimum negative checks. Missing-capability claims require checks for symbol/file search, alternative naming,
 build/configuration, and responsibility. Behavior mismatch claims require an alternative-implementation check.
 Every searched negative check must cite the `query_id` that produced it.
+
+`frame_obligations`, `submit_conclusion`, and `submit_review` validate schema, references, and policy before
+writing canonical artifacts. State transitions are centralized in the audit runtime; failed validation does not
+modify requirement state.
 
 The Reviewer does not search the repository. It only checks whether the supplied spec evidence, code evidence,
 and reasoning support the mismatch. Only accepted mismatch or partial findings are assembled into final issues.

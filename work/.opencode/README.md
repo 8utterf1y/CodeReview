@@ -40,6 +40,7 @@ The command writes:
 
 - `.specdiff/issues.json`
 - `.specdiff/issues.sarif`
+- `.specdiff/audit/actions.json`
 - `.specdiff/audit/code-index/codefacts.sqlite`
 - `.specdiff/audit/queries.jsonl`
 - `.specdiff/audit/evidence.jsonl`
@@ -53,8 +54,12 @@ agents investigate and verify through typed tools:
 2. build SQLite Code Facts with Aider Tree-sitter tags,
 3. frame 1-3 implementation obligations for each Requirement Pack,
 4. investigate those obligations using controlled `code_search` queries,
-5. review mismatch evidence once with a lightweight Reviewer,
-6. assemble machine-readable findings programmatically.
+5. validate each subagent dispatch with `audit_dispatch_result`,
+6. review mismatch evidence once with a lightweight Reviewer,
+7. assemble machine-readable findings programmatically.
+
+Every subagent dispatch is an Action with lifecycle `dispatched -> committed`, `failed`, or
+`failed_terminal`. The Orchestrator never decides recovery; the runtime returns retry or fallback.
 
 Primary artifacts:
 
@@ -64,6 +69,7 @@ Primary artifacts:
 - `commands/spec-audit.md`
 - `tools/audit_start.ts`
 - `tools/audit_next.ts`
+- `tools/audit_dispatch_result.ts`
 - `tools/code_search.ts`
 - `tools/frame_obligations.ts`
 - `tools/submit_conclusion.ts`

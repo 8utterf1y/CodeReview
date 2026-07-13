@@ -24,9 +24,16 @@ and final assembly. Agents never edit controlled artifacts.
    clause IDs. It must not search code in this phase.
 4. For `investigate`, Investigator uses `code_search` against the program-stored obligations and submits
    `satisfied`, `mismatch`, or `uncertain` through `submit_conclusion`.
-5. The program requests `evidence-reviewer` only for mismatch conclusions.
-6. Reviewer checks the supplied packet once and submits `accept`, `reject`, or `uncertain`; it does not search.
-7. `audit_next` supplies every transition. `audit_finish` alone writes JSON and SARIF.
+5. After every subagent return, Orchestrator calls `audit_dispatch_result` for the same requirement and action.
+   Only the runtime may decide retry or fallback.
+6. The program requests `evidence-reviewer` only for mismatch conclusions.
+7. Reviewer checks the supplied packet once and submits `accept`, `reject`, or `uncertain`; it does not search.
+8. `audit_next` supplies every transition. `audit_finish` alone writes JSON and SARIF.
+
+Each `audit_next` worker packet contains an `action_id`. Pass that same `action_id` to `audit_dispatch_result`.
+Do not reuse an old action ID after the runtime returns a retry packet.
+If `audit_next` returns `awaiting_dispatch_result`, call `audit_dispatch_result` for that action before doing
+anything else.
 
 ## Evidence Rules
 

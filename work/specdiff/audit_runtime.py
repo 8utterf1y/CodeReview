@@ -23,6 +23,7 @@ QUERY_MODE_ALIASES = {
     "definition": "symbol", "definitions": "symbol", "defs": "symbol",
     "call": "callers",
 }
+MAX_SUBAGENT_ATTEMPTS = 2
 
 
 def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Optional[Path] = None) -> Dict[str, Any]:
@@ -43,9 +44,10 @@ def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Option
         "requirements_sha256": _sha256_json(locked), "code_revision": repository["revision"],
         "stage": "investigating", "assembly_allowed": False,
         "requirements": {item["id"]: {"investigation": "pending", "verification": "pending"} for item in requirements},
-        "counters": {"query": 0, "evidence": 0}, "created_at": _now(), "updated_at": _now(),
+        "counters": {"query": 0, "evidence": 0, "action": 0}, "created_at": _now(), "updated_at": _now(),
     }
     _write_json(workspace / "audit-state.json", state)
+    _write_json(workspace / "actions.json", {"schema_version": "1.0", "actions": []})
     _write_json(workspace / "investigation-drafts.json", {"schema_version": "1.0", "drafts": []})
     _write_json(workspace / "investigations.json", {"schema_version": "1.0", "investigations": []})
     _write_json(workspace / "verifications.json", {"schema_version": "1.0", "verifications": []})
@@ -83,36 +85,90 @@ def audit_requirements(workspace: Path) -> Dict[str, Any]:
 
 def next_action(workspace: Path) -> Dict[str, Any]:
     """Return one deterministic workflow instruction for the thin orchestrator."""
-    state = _state(workspace)
-    requirements = {item["id"]: item for item in _load_json(workspace / "requirements.json")["requirements"]}
-    for req_id, item in state["requirements"].items():
-        if item["investigation"] == "pending":
-            requirement = requirements[req_id]
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        action = _next_action_locked(workspace, state)
+        _save_state(workspace, state)
+        return action
+
+
+def dispatch_result(workspace: Path, payload_path: Path) -> Dict[str, Any]:
+    """Validate that a dispatched subagent actually advanced the expected state."""
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        payload = _load_json(payload_path)
+        req_id = str(payload.get("requirement_id") or payload.get("requirementId") or "")
+        action = str(payload.get("action") or "")
+        action_id = str(payload.get("action_id") or payload.get("actionId") or "")
+        _require_requirement(state, req_id)
+        if action not in {"frame_obligations", "investigate", "review"}:
+            raise ValueError("dispatch_result action must be frame_obligations, investigate, or review")
+        record = _current_action(workspace, req_id, action, action_id)
+        if not record:
             return {
-                "next_action": "frame_obligations",
-                "requirement_pack": requirement,
-                "requirement": requirement,
-                "code_hints": _code_hints_for_requirement(workspace, requirement),
-                "instruction": "Frame 1 to 3 implementation obligations tied to current pack clauses.",
+                "dispatch_status": "failed", "reason": "action_not_found",
+                "action_id": action_id or None, "requirement_id": req_id, "action": action,
+                "recovery_action": "call_audit_next",
             }
-        if item["investigation"] == "framed":
-            requirement = requirements[req_id]
-            obligations = _draft_for_requirement(workspace, req_id)["obligations"]
+        expected_before, expected_after = record["expected_before"], record["expected_after"]
+        current_state = _actual_state_for_action(state, req_id, action)
+        if record["status"] == "committed":
             return {
-                "next_action": "investigate",
-                "requirement_pack": requirement,
-                "requirement": requirement,
-                "obligations": obligations,
-                "code_hints": _code_hints_for_requirement(workspace, requirement),
-                "required_checks": required_checks(requirement, obligations),
-                "instruction": "Investigate the framed obligations and submit one conclusion.",
+                "dispatch_status": "completed", "reason": "already_committed",
+                "action_id": record["action_id"], "requirement_id": req_id, "action": action,
+                "expected_state": expected_after, "current_state": current_state,
+                "next_action": "call_audit_next",
             }
-    for req_id, item in state["requirements"].items():
-        if item["verification"] == "pending" and item["investigation"] == "submitted":
-            return {"next_action": "review", "review_packet": review_bundle(workspace, req_id)}
-    if state["assembly_allowed"]:
-        return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
-    return {"next_action": "blocked", "reason": "audit state has no runnable transition", "status": audit_status(workspace)}
+        if record["status"] == "failed_terminal":
+            return {
+                "dispatch_status": "failed_finalized", "reason": record.get("error") or "state_unchanged",
+                "action_id": record["action_id"], "requirement_id": req_id, "action": action,
+                "attempt": record["attempt"], "max_attempts": record["max_attempts"],
+                "expected_state": expected_after, "current_state": current_state,
+                "recovery_action": "terminal_fallback", "next_action": "call_audit_next",
+            }
+        if record["status"] != "dispatched":
+            return {
+                "dispatch_status": "failed", "reason": f"action_not_dispatched:{record['status']}",
+                "action_id": record["action_id"], "requirement_id": req_id, "action": action,
+                "recovery_action": "call_audit_next",
+            }
+        if current_state == expected_after:
+            _update_action(workspace, record["action_id"], status="committed", error="")
+            _save_state(workspace, state)
+            return {
+                "dispatch_status": "completed", "action_id": record["action_id"],
+                "requirement_id": req_id, "action": action,
+                "expected_state": expected_after, "current_state": current_state,
+                "next_action": "call_audit_next",
+            }
+        if current_state != expected_before:
+            raise ValueError(
+                f"runtime invariant error: {req_id}:{action} expected {expected_before} or {expected_after}, got {current_state}"
+            )
+        if int(record["attempt"]) < MAX_SUBAGENT_ATTEMPTS:
+            _update_action(workspace, record["action_id"], status="failed", error="state_unchanged")
+            retry = _ensure_action(workspace, state, req_id, action, expected_before=expected_before, expected_after=expected_after)
+            _save_state(workspace, state)
+            return {
+                "dispatch_status": "failed", "reason": "state_unchanged",
+                "action_id": record["action_id"], "retry_action_id": retry["action_id"],
+                "requirement_id": req_id, "action": action, "attempt": record["attempt"],
+                "max_attempts": MAX_SUBAGENT_ATTEMPTS,
+                "expected_state": expected_after, "current_state": current_state,
+                "recovery_action": "retry_same_action", "retry_packet": retry,
+            }
+        _update_action(workspace, record["action_id"], status="failed_terminal", error="state_unchanged")
+        _save_state(workspace, state)
+        return {
+            "dispatch_status": "failed_finalized", "reason": "state_unchanged",
+            "action_id": record["action_id"],
+            "requirement_id": req_id, "action": action, "attempt": record["attempt"],
+            "max_attempts": MAX_SUBAGENT_ATTEMPTS,
+            "expected_state": expected_after, "current_state": current_state,
+            "recovery_action": "terminal_fallback",
+            "next_action": "call_audit_next",
+        }
 
 
 def frame_obligations(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -135,9 +191,8 @@ def frame_obligations(workspace: Path, payload_path: Path) -> Dict[str, Any]:
             "requirement_id": req_id, "status": "framed", "obligations": obligations,
             "created_at": now, "updated_at": now,
         }
+        _transition(state, req_id, "obligations_framed")
         _upsert(workspace / "investigation-drafts.json", "drafts", req_id, draft)
-        state["requirements"][req_id]["investigation"] = "framed"
-        _refresh_stage(state)
         _save_state(workspace, state)
         return {"accepted": True, "requirement_id": req_id, "obligations": obligations, "next_step": "investigate"}
 
@@ -148,6 +203,10 @@ def submit_conclusion(workspace: Path, payload_path: Path) -> Dict[str, Any]:
         payload = _load_json(payload_path)
         req_id = str(payload.get("requirement_id") or "")
         _require_requirement(state, req_id)
+        if state["requirements"][req_id]["investigation"] == "submitted":
+            existing = next((item for item in _load_json(workspace / "investigations.json")["investigations"] if item.get("requirement_id") == req_id), None)
+            if existing:
+                return {"accepted": True, "idempotent": True, "requirement_id": req_id, "next": "call_audit_dispatch_result"}
         if state["requirements"][req_id]["investigation"] == "pending":
             raise ValueError("submission rejected: current investigation phase is pending; call frame_obligations first")
         if state["requirements"][req_id]["investigation"] != "framed":
@@ -198,12 +257,10 @@ def submit_conclusion(workspace: Path, payload_path: Path) -> Dict[str, Any]:
             "obligations": draft["obligations"], "obligation_results": obligation_results,
             "findings": obligation_results, "submitted_at": _now(),
         }
+        _transition(state, req_id, "investigation_submitted", verification="pending" if conclusion == "mismatch" else "not_required")
         _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
-        state["requirements"][req_id]["investigation"] = "submitted"
-        state["requirements"][req_id]["verification"] = "pending" if conclusion == "mismatch" else "not_required"
-        _refresh_stage(state)
         _save_state(workspace, state)
-        return {"accepted": True, "requirement_id": req_id, "conclusion": conclusion, "next": next_action(workspace)}
+        return {"accepted": True, "requirement_id": req_id, "conclusion": conclusion, "next": "call_audit_dispatch_result"}
 
 
 def submit_simple_investigation(workspace: Path, payload_path: Path) -> Dict[str, Any]:
@@ -212,6 +269,10 @@ def submit_simple_investigation(workspace: Path, payload_path: Path) -> Dict[str
         payload = _load_json(payload_path)
         req_id = str(payload.get("requirement_id") or "")
         _require_requirement(state, req_id)
+        if state["requirements"][req_id]["investigation"] == "submitted":
+            existing = next((item for item in _load_json(workspace / "investigations.json")["investigations"] if item.get("requirement_id") == req_id), None)
+            if existing:
+                return {"accepted": True, "idempotent": True, "requirement_id": req_id, "next": "call_audit_dispatch_result"}
         conclusion = payload.get("conclusion")
         if conclusion not in {"satisfied", "mismatch", "uncertain"}:
             raise ValueError("conclusion must be satisfied, mismatch, or uncertain")
@@ -262,12 +323,10 @@ def submit_simple_investigation(workspace: Path, payload_path: Path) -> Dict[str
             "agent_conclusion": conclusion, "negative_checks": negative_checks,
             "obligations": obligations, "findings": findings, "submitted_at": _now(),
         }
+        _transition(state, req_id, "investigation_submitted", verification="pending" if conclusion == "mismatch" else "not_required")
         _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
-        state["requirements"][req_id]["investigation"] = "submitted"
-        state["requirements"][req_id]["verification"] = "pending" if conclusion == "mismatch" else "not_required"
-        _refresh_stage(state)
         _save_state(workspace, state)
-        return {"accepted": True, "requirement_id": req_id, "conclusion": conclusion, "next": next_action(workspace)}
+        return {"accepted": True, "requirement_id": req_id, "conclusion": conclusion, "next": "call_audit_dispatch_result"}
 
 
 def review_bundle(workspace: Path, requirement_id: str) -> Dict[str, Any]:
@@ -305,6 +364,10 @@ def submit_simple_review(workspace: Path, payload_path: Path) -> Dict[str, Any]:
         payload = _load_json(payload_path)
         req_id = str(payload.get("requirement_id") or "")
         _require_requirement(state, req_id)
+        if state["requirements"][req_id]["verification"] == "submitted":
+            existing = next((item for item in _load_json(workspace / "verifications.json")["verifications"] if item.get("requirement_id") == req_id), None)
+            if existing:
+                return {"accepted": True, "idempotent": True, "requirement_id": req_id, "next": "call_audit_dispatch_result"}
         if state["requirements"][req_id]["verification"] != "pending":
             raise ValueError(f"{req_id}: review is not pending")
         verdict = payload.get("verdict")
@@ -320,11 +383,10 @@ def submit_simple_review(workspace: Path, payload_path: Path) -> Dict[str, Any]:
             "challenges": payload.get("unsupported_claims") or [], "recommended_status": None,
             "lightweight_review": True, "submitted_at": _now(),
         }
+        _transition(state, req_id, "review_submitted")
         _upsert(workspace / "verifications.json", "verifications", req_id, canonical)
-        state["requirements"][req_id]["verification"] = "submitted"
-        _refresh_stage(state)
         _save_state(workspace, state)
-        return {"accepted": True, "requirement_id": req_id, "verdict": verdict, "next": next_action(workspace)}
+        return {"accepted": True, "requirement_id": req_id, "verdict": verdict, "next": "call_audit_dispatch_result"}
 
 
 def finish_audit(workspace: Path) -> Dict[str, Any]:
@@ -332,6 +394,8 @@ def finish_audit(workspace: Path) -> Dict[str, Any]:
     output = state.get("requested_output")
     if not output:
         raise ValueError("audit was initialized without an output path")
+    if not state.get("assembly_allowed"):
+        raise ValueError("state invariant error: audit_finish called before audit_next returned finish")
     return assemble_result(workspace, Path(output))
 
 
@@ -485,12 +549,8 @@ def _submit_investigation(workspace: Path, payload_path: Path) -> Dict[str, Any]
         "issue": issue if status in {"violated", "partial"} else None,
         "submitted_at": _now(),
     }
+    _transition(state, req_id, "investigation_submitted", verification="pending" if _verification_required(workspace, canonical) else "not_required")
     _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
-    state["requirements"][req_id]["investigation"] = "submitted"
-    state["requirements"][req_id]["verification"] = (
-        "pending" if _verification_required(workspace, canonical) else "not_required"
-    )
-    _refresh_stage(state)
     _save_state(workspace, state)
     return {"accepted": True, "requirement_id": req_id, "status": status, "audit": audit_status(workspace)}
 
@@ -505,6 +565,10 @@ def _submit_verification(workspace: Path, payload_path: Path) -> Dict[str, Any]:
     payload = _load_json(payload_path)
     req_id = str(payload.get("requirement_id") or "")
     _require_requirement(state, req_id)
+    if state["requirements"][req_id]["verification"] == "submitted":
+        existing = next((item for item in _load_json(workspace / "verifications.json")["verifications"] if item.get("requirement_id") == req_id), None)
+        if existing:
+            return {"accepted": True, "idempotent": True, "requirement_id": req_id, "audit": audit_status(workspace)}
     if state["requirements"][req_id]["investigation"] != "submitted":
         raise ValueError(f"{req_id}: investigation must be submitted before verification")
     _validate_submission_refs(workspace, req_id, "verifier", payload)
@@ -529,9 +593,8 @@ def _submit_verification(workspace: Path, payload_path: Path) -> Dict[str, Any]:
         "challenges": challenges,
         "recommended_status": recommended_status, "submitted_at": _now(),
     }
+    _transition(state, req_id, "review_submitted")
     _upsert(workspace / "verifications.json", "verifications", req_id, canonical)
-    state["requirements"][req_id]["verification"] = "submitted"
-    _refresh_stage(state)
     _save_state(workspace, state)
     return {"accepted": True, "requirement_id": req_id, "verdict": verdict, "audit": audit_status(workspace)}
 
@@ -570,7 +633,8 @@ def _assemble_result(workspace: Path, out: Path) -> Dict[str, Any]:
         if status in {"violated", "partial"} and verification["verdict"] == "accepted" and investigation.get("issue"):
             issues.append(_assemble_issue(len(issues) + 1, req, investigation, verification, evidence_map))
         if status in {"unknown", "no_evidence_found", "non_verifiable"} or not verification_ok:
-            unverified.append({"requirement_id": req_id, "status": status, "reason": verification["reasoning"]})
+            reason = verification["reasoning"] if not verification_ok else investigation.get("reasoning")
+            unverified.append({"requirement_id": req_id, "status": status, "reason": reason})
     counts = Counter(item["status"] for item in records)
     payload = {
         "tool": "specdiff", "schema_version": "2.0", "artifact_type": "assembled_audit",
@@ -660,7 +724,12 @@ def _source_query(repo: Path, files: List[Dict[str, Any]], path: str, start: int
     if not item: raise ValueError(f"path is not indexed: {path}")
     lines = (repo / path).read_text(encoding="utf-8", errors="replace").splitlines()
     start, end = max(1, start), min(len(lines), max(start, end))
-    return [{"file_id": item["file_id"], "path": path, "line": line_no, "quote": lines[line_no - 1][:500], "backend": "source_read", "precision": "exact_source"} for line_no in range(start, end + 1)]
+    quote = "\n".join(lines[start - 1:end])[:4000]
+    return [{
+        "file_id": item["file_id"], "path": path, "line": start,
+        "start_line": start, "end_line": end, "quote": quote,
+        "backend": "source_read", "precision": "exact_source_span",
+    }]
 
 
 def _materialize_result(repo: Path, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -683,7 +752,7 @@ def _record_query(workspace: Path, state: Dict[str, Any], req_id: str, role: str
     evidence_ids = []
     with (workspace / "evidence.jsonl").open("a", encoding="utf-8") as evidence_file:
         for result in results:
-            if "path" not in result or "line" not in result: continue
+            if "path" not in result or ("line" not in result and "start_line" not in result): continue
             state["counters"]["evidence"] += 1
             evidence_id = f"E-{state['counters']['evidence']:08d}"
             evidence = {"evidence_id": evidence_id, "query_id": query_id, "requirement_id": req_id, **result}
@@ -1074,6 +1143,240 @@ def _validate_verification_check(check: Any) -> None:
         raise ValueError("verification check evidence_ids must be an array")
 
 
+def _next_action_locked(workspace: Path, state: Dict[str, Any]) -> Dict[str, Any]:
+    applied = _apply_terminal_fallbacks(workspace, state)
+    outstanding = _outstanding_dispatched_action(workspace)
+    if outstanding:
+        return {
+            "next_action": "awaiting_dispatch_result",
+            "action": outstanding,
+            "action_id": outstanding["action_id"],
+            "requirement_id": outstanding["requirement_id"],
+            "instruction": "Call audit_dispatch_result for the outstanding action before dispatching more work.",
+            "applied_fallbacks": applied,
+        }
+    requirements = {item["id"]: item for item in _load_json(workspace / "requirements.json")["requirements"]}
+    for req_id, item in state["requirements"].items():
+        if item["investigation"] == "pending":
+            requirement = requirements[req_id]
+            action = _ensure_action(workspace, state, req_id, "frame_obligations", expected_before="pending", expected_after="framed")
+            return {
+                "next_action": "frame_obligations", "action": action, "action_id": action["action_id"],
+                "requirement_id": req_id, "requirement_pack": requirement, "requirement": requirement,
+                "code_hints": _code_hints_for_requirement(workspace, requirement),
+                "instruction": "Frame 1 to 3 implementation obligations tied to current pack clauses.",
+            }
+        if item["investigation"] == "framed":
+            requirement = requirements[req_id]
+            obligations = _draft_for_requirement(workspace, req_id)["obligations"]
+            action = _ensure_action(workspace, state, req_id, "investigate", expected_before="framed", expected_after="submitted")
+            return {
+                "next_action": "investigate", "action": action, "action_id": action["action_id"],
+                "requirement_id": req_id, "requirement_pack": requirement, "requirement": requirement,
+                "obligations": obligations, "code_hints": _code_hints_for_requirement(workspace, requirement),
+                "required_checks": required_checks(requirement, obligations),
+                "instruction": "Investigate the framed obligations and submit one conclusion.",
+            }
+    for req_id, item in state["requirements"].items():
+        if item["verification"] == "pending" and item["investigation"] == "submitted":
+            action = _ensure_action(workspace, state, req_id, "review", expected_before="pending", expected_after="submitted")
+            return {"next_action": "review", "action": action, "action_id": action["action_id"], "requirement_id": req_id, "review_packet": review_bundle(workspace, req_id)}
+    if state["assembly_allowed"]:
+        return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
+    return {"next_action": "blocked", "reason": "audit state has no runnable transition", "status": audit_status(workspace)}
+
+
+def _actions_path(workspace: Path) -> Path:
+    return workspace / "actions.json"
+
+
+def _load_actions(workspace: Path) -> Dict[str, Any]:
+    path = _actions_path(workspace)
+    if not path.exists():
+        return {"schema_version": "1.0", "actions": []}
+    return _load_json(path)
+
+
+def _ensure_action(
+    workspace: Path, state: Dict[str, Any], req_id: str, action_type: str,
+    *, expected_before: str, expected_after: str,
+) -> Dict[str, Any]:
+    payload = _load_actions(workspace)
+    for action in reversed(payload["actions"]):
+        if (
+            action.get("requirement_id") == req_id
+            and action.get("action_type") == action_type
+            and action.get("status") == "dispatched"
+        ):
+            return action
+    attempts = [
+        int(action.get("attempt", 0)) for action in payload["actions"]
+        if action.get("requirement_id") == req_id and action.get("action_type") == action_type
+    ]
+    attempt = (max(attempts) if attempts else 0) + 1
+    state.setdefault("counters", {})["action"] = int(state.setdefault("counters", {}).get("action", 0)) + 1
+    now = _now()
+    action = {
+        "action_id": f"A-{state['counters']['action']:07d}",
+        "action_type": action_type,
+        "requirement_id": req_id,
+        "attempt": attempt,
+        "max_attempts": MAX_SUBAGENT_ATTEMPTS,
+        "expected_before": expected_before,
+        "expected_after": expected_after,
+        "status": "dispatched",
+        "error": "",
+        "created_at": now,
+        "dispatched_at": now,
+    }
+    payload["actions"].append(action)
+    _write_json(_actions_path(workspace), payload)
+    return action
+
+
+def _current_action(workspace: Path, req_id: str, action_type: str, action_id: str = "") -> Optional[Dict[str, Any]]:
+    actions = _load_actions(workspace)["actions"]
+    if action_id:
+        action = next((item for item in actions if item.get("action_id") == action_id), None)
+        if not action or action.get("requirement_id") != req_id or action.get("action_type") != action_type:
+            return None
+        return action
+    for action in reversed(actions):
+        if action.get("requirement_id") == req_id and action.get("action_type") == action_type and action.get("status") == "dispatched":
+            return action
+    return None
+
+
+def _outstanding_dispatched_action(workspace: Path) -> Optional[Dict[str, Any]]:
+    for action in _load_actions(workspace)["actions"]:
+        if action.get("status") == "dispatched":
+            return action
+    return None
+
+
+def _apply_terminal_fallbacks(workspace: Path, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payload = _load_actions(workspace)
+    applied = []
+    changed = False
+    for action in payload["actions"]:
+        if action.get("status") != "failed_terminal" or action.get("fallback_applied_at"):
+            continue
+        recovery = _finalize_failed_dispatch(
+            workspace, state, action["requirement_id"], action["action_type"],
+            _actual_state_for_action(state, action["requirement_id"], action["action_type"]),
+        )
+        action["fallback_applied_at"] = _now()
+        action["fallback"] = recovery
+        applied.append({"action_id": action["action_id"], **recovery})
+        changed = True
+    if changed:
+        _write_json(_actions_path(workspace), payload)
+    return applied
+
+
+def _update_action(workspace: Path, action_id: str, *, status: str, error: str = "") -> Dict[str, Any]:
+    if status not in {"created", "dispatched", "committed", "failed", "failed_terminal"}:
+        raise ValueError(f"invalid action status: {status}")
+    payload = _load_actions(workspace)
+    for action in payload["actions"]:
+        if action.get("action_id") == action_id:
+            action["status"] = status
+            action["error"] = error
+            if status == "committed":
+                action["committed_at"] = _now()
+            if status in {"failed", "failed_terminal"}:
+                action["failed_at"] = _now()
+            _write_json(_actions_path(workspace), payload)
+            return action
+    raise ValueError(f"unknown action_id: {action_id}")
+
+
+def _dispatch_states(state: Dict[str, Any], req_id: str, action: str) -> tuple[str, str]:
+    item = state["requirements"][req_id]
+    if action == "frame_obligations":
+        return "framed", item["investigation"]
+    if action == "investigate":
+        return "submitted", item["investigation"]
+    return "submitted", item["verification"]
+
+
+def _actual_state_for_action(state: Dict[str, Any], req_id: str, action: str) -> str:
+    return _dispatch_states(state, req_id, action)[1]
+
+
+def _transition(state: Dict[str, Any], req_id: str, event: str, *, verification: Optional[str] = None) -> None:
+    item = state["requirements"][req_id]
+    if event == "obligations_framed":
+        if item["investigation"] != "pending":
+            raise ValueError(f"invalid transition {event} from investigation={item['investigation']}")
+        item["investigation"] = "framed"
+    elif event == "investigation_submitted":
+        if item["investigation"] != "framed":
+            raise ValueError(f"invalid transition {event} from investigation={item['investigation']}")
+        if verification not in {"pending", "not_required"}:
+            raise ValueError("investigation_submitted requires verification pending or not_required")
+        item["investigation"] = "submitted"
+        item["verification"] = verification
+    elif event == "investigation_failed":
+        if item["investigation"] not in {"pending", "framed"}:
+            raise ValueError(f"invalid transition {event} from investigation={item['investigation']}")
+        item["investigation"] = "submitted"
+        item["verification"] = "not_required"
+    elif event in {"review_submitted", "review_failed"}:
+        if item["investigation"] != "submitted" or item["verification"] != "pending":
+            raise ValueError(f"invalid transition {event} from investigation={item['investigation']} verification={item['verification']}")
+        item["verification"] = "submitted"
+    else:
+        raise ValueError(f"unknown transition event: {event}")
+    _refresh_stage(state)
+
+
+def _finalize_failed_dispatch(workspace: Path, state: Dict[str, Any], req_id: str, action: str, previous_state: str) -> Dict[str, Any]:
+    if action in {"frame_obligations", "investigate"}:
+        reason = "framing_agent_failed_to_submit" if action == "frame_obligations" else "investigator_failed_to_submit"
+        canonical = {
+            "requirement_id": req_id,
+            "proposed_status": "unknown",
+            "reasoning": reason,
+            "query_ids": sorted(
+                item["query_id"] for item in _jsonl_map(workspace / "queries.jsonl", "query_id").values()
+                if item["requirement_id"] == req_id and item["role"] == "investigator"
+            ),
+            "evidence_ids": [],
+            "counterexample_query_ids": [],
+            "claim_scope": "agent_failure",
+            "unresolved_questions": [reason],
+            "issue": None,
+            "agent_conclusion": "uncertain",
+            "negative_checks": [],
+            "obligations": _draft_for_requirement(workspace, req_id).get("obligations", []) if previous_state == "framed" else [],
+            "obligation_results": [],
+            "findings": [],
+            "submitted_at": _now(),
+            "agent_failed": True,
+            "failure_action": action,
+        }
+        _transition(state, req_id, "investigation_failed")
+        _upsert(workspace / "investigations.json", "investigations", req_id, canonical)
+        return {"finalized": "unknown_investigation", "current_state": "submitted", "reason": reason}
+    canonical = {
+        "requirement_id": req_id,
+        "verdict": "needs_more_work",
+        "reasoning": "reviewer_failed_to_submit",
+        "query_ids": [],
+        "evidence_ids": [],
+        "challenges": ["reviewer_failed_to_submit"],
+        "recommended_status": "unknown",
+        "lightweight_review": True,
+        "submitted_at": _now(),
+        "agent_failed": True,
+        "failure_action": action,
+    }
+    _transition(state, req_id, "review_failed")
+    _upsert(workspace / "verifications.json", "verifications", req_id, canonical)
+    return {"finalized": "failed_review", "current_state": "submitted", "reason": "reviewer_failed_to_submit"}
+
+
 def _refresh_stage(state: Dict[str, Any]) -> None:
     values = list(state["requirements"].values())
     investigations_done = all(item["investigation"] == "submitted" for item in values)
@@ -1094,7 +1397,7 @@ def _verification_required(workspace: Path, investigation: Dict[str, Any]) -> bo
     precisions = {
         evidence[item].get("precision") for item in investigation.get("evidence_ids", []) if item in evidence
     }
-    return not precisions or not precisions.issubset({"exact_source", "compiler_precise"})
+    return not precisions or not precisions.issubset({"exact_source", "exact_source_span", "compiler_precise"})
 
 
 def _assemble_issue(index: int, req: Dict[str, Any], investigation: Dict[str, Any], verification: Dict[str, Any], evidence_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
