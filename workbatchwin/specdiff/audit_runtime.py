@@ -27,6 +27,9 @@ QUERY_MODE_ALIASES = {
 MAX_SUBAGENT_ATTEMPTS = 2
 TARGET_BATCHES = 24
 HARD_MAX_BATCHES = 30
+MIN_TOPIC_MERGE_SCORE = 4.0
+MAX_BATCH_PACKET_PACKS = 20
+MAX_BATCH_PACKET_CLAUSES = 160
 MAX_BATCH_QUERIES = 24
 MAX_BATCH_TEXT_QUERIES = 6
 
@@ -49,12 +52,11 @@ def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Option
         "requirements_sha256": _sha256_json(locked), "code_revision": repository["revision"],
         "stage": "investigating", "assembly_allowed": False,
         "requirements": {item["id"]: {"investigation": "pending", "verification": "pending"} for item in requirements},
-        "batch_cursor": 0, "active_batch_id": None, "batch_mode": len(requirements) > 1,
+        "batch_cursor": 0, "active_batch_id": None, "batch_mode": True,
         "counters": {"query": 0, "evidence": 0, "action": 0}, "created_at": _now(), "updated_at": _now(),
     }
     _write_json(workspace / "audit-state.json", state)
-    if len(requirements) > 1:
-        _write_json(workspace / "batches.json", {"schema_version": "1.0", "batches": _build_audit_batches(workspace, requirements)})
+    _write_json(workspace / "batches.json", {"schema_version": "1.0", "batches": _build_audit_batches(workspace, requirements)})
     _write_json(workspace / "actions.json", {"schema_version": "1.0", "actions": []})
     _write_json(workspace / "investigation-drafts.json", {"schema_version": "1.0", "drafts": []})
     _write_json(workspace / "investigations.json", {"schema_version": "1.0", "investigations": []})
@@ -423,12 +425,25 @@ def submit_simple_review(workspace: Path, payload_path: Path) -> Dict[str, Any]:
 
 
 def finish_audit(workspace: Path) -> Dict[str, Any]:
-    state = _state(workspace)
-    output = state.get("requested_output")
-    if not output:
-        raise ValueError("audit was initialized without an output path")
-    if not state.get("assembly_allowed"):
-        raise ValueError("state invariant error: audit_finish called before audit_next returned finish")
+    with _audit_lock(workspace):
+        state = _state(workspace)
+        output = state.get("requested_output")
+        if not output:
+            raise ValueError("audit was initialized without an output path")
+        _finalize_active_batch(workspace, state)
+        for req_id, item in list(state["requirements"].items()):
+            if item["investigation"] != "submitted":
+                _persist_pack_result(
+                    workspace, state,
+                    {
+                        "requirement_id": req_id, "status": "unknown",
+                        "summary": "audit_finish_finalized_incomplete_pack",
+                        "evidence_ids": [], "spec_clause_ids": [], "confidence": 0.0,
+                    },
+                    reason="audit_finish_finalized_incomplete_pack",
+                )
+        _refresh_stage(state)
+        _save_state(workspace, state)
     return assemble_result(workspace, Path(output))
 
 
@@ -1058,7 +1073,7 @@ def _obligation_id(req_id: str, description: str, source_clause_ids: List[str]) 
 
 def _spec_evidence_for_issue(req: Dict[str, Any], investigation: Dict[str, Any]) -> List[Dict[str, Any]]:
     obligations = {item["id"]: item for item in investigation.get("obligations", [])}
-    clause_ids = []
+    clause_ids = list(investigation.get("spec_clause_ids") or [])
     for result in investigation.get("obligation_results") or investigation.get("findings") or []:
         if result.get("status") not in {"contradicted", "partial", "not_found"}:
             continue
@@ -1253,8 +1268,7 @@ def _symbol_family(name: str) -> str:
     if not tokens:
         compact = re.sub(r"[^A-Za-z0-9]+", "", name.lower())
         return compact[:12] if len(compact) >= 3 else ""
-    token = tokens[0]
-    return re.sub(r"\d+$", "", token)[:16]
+    return tokens[0][:16]
 
 
 def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
@@ -1344,9 +1358,10 @@ def _build_audit_batches(workspace: Path, requirements: List[Dict[str, Any]]) ->
     for req in requirements:
         grouped.setdefault(_initial_topic_key(req, affinities[req["id"]]), []).append(req)
     topics = [_make_topic(key, rows, affinities) for key, rows in grouped.items()]
-    topics = _merge_topics_to_budget(topics, TARGET_BATCHES)
+    topics = _merge_topics_to_budget(topics, TARGET_BATCHES, min_score=MIN_TOPIC_MERGE_SCORE)
     if len(topics) > HARD_MAX_BATCHES:
-        topics = _merge_topics_to_budget(topics, HARD_MAX_BATCHES)
+        topics = _merge_topics_to_budget(topics, HARD_MAX_BATCHES, min_score=MIN_TOPIC_MERGE_SCORE)
+    topics = _split_oversized_topics(topics, affinities)
     topics = sorted(topics, key=lambda item: (-len(item["requirements"]), item["key"]))
     return [_make_batch(index, topic) for index, topic in enumerate(topics, 1)]
 
@@ -1382,7 +1397,7 @@ def _make_topic(key: str, rows: List[Dict[str, Any]], affinities: Dict[str, Dict
     return topic
 
 
-def _merge_topics_to_budget(topics: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
+def _merge_topics_to_budget(topics: List[Dict[str, Any]], target: int, *, min_score: float = 0.0) -> List[Dict[str, Any]]:
     topics = list(topics)
     while len(topics) > target:
         best_pair = None
@@ -1394,7 +1409,7 @@ def _merge_topics_to_budget(topics: List[Dict[str, Any]], target: int) -> List[D
                 if best_score is None or pair_key > best_score:
                     best_score = pair_key
                     best_pair = (left_index, right_index)
-        if best_pair is None:
+        if best_pair is None or best_score is None or best_score[0] < min_score:
             break
         left_index, right_index = best_pair
         merged = _merge_two_topics(topics[left_index], topics[right_index])
@@ -1403,14 +1418,40 @@ def _merge_topics_to_budget(topics: List[Dict[str, Any]], target: int) -> List[D
     return topics
 
 
+def _split_oversized_topics(topics: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for topic in topics:
+        chunk: List[Dict[str, Any]] = []
+        clause_count = 0
+        part = 1
+        for req in topic["requirements"]:
+            req_clause_count = len(req.get("clause_ids") or []) or 1
+            if chunk and (
+                len(chunk) >= MAX_BATCH_PACKET_PACKS
+                or clause_count + req_clause_count > MAX_BATCH_PACKET_CLAUSES
+            ):
+                result.append(_make_topic(f"{topic['key']}#{part}", chunk, affinities))
+                part += 1
+                chunk = []
+                clause_count = 0
+            chunk.append(req)
+            clause_count += req_clause_count
+        if chunk:
+            suffix = f"#{part}" if part > 1 else ""
+            result.append(_make_topic(f"{topic['key']}{suffix}", chunk, affinities))
+    return result
+
+
 def _topic_merge_score(left: Dict[str, Any], right: Dict[str, Any]) -> float:
     score = 0.0
     left_component = next(iter(left["components"]), None)
     right_component = next(iter(right["components"]), None)
-    if left_component and left_component == right_component:
+    if left_component and left_component != "unknown" and left_component == right_component:
         score += 20
-    score += 8 * len(set(left["components"]) & set(right["components"]))
-    score += 6 * len(set(left["symbol_families"]) & set(right["symbol_families"]))
+    component_overlap = (set(left["components"]) & set(right["components"])) - {"unknown"}
+    family_overlap = (set(left["symbol_families"]) & set(right["symbol_families"])) - {"general", "unknown"}
+    score += 8 * len(component_overlap)
+    score += 6 * len(family_overlap)
     score += 4 * len(set(left["files"]) & set(right["files"]))
     score += 1.5 * len(set(left["documents"]) & set(right["documents"]))
     score += 1 * len(set(left["keywords"]) & set(right["keywords"]))
@@ -1533,10 +1574,19 @@ def _validate_one_batch_result(
         item = evidence.get(evidence_id)
         if not item or not _evidence_allowed_for_batch_result(item, batch["batch_id"], req_id):
             raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
-    spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
-    spec_clause_ids = spec_clause_ids or []
-    allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
-    if not isinstance(spec_clause_ids, list) or not set(spec_clause_ids).issubset(allowed_clauses):
+    raw_spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
+    seed_clause_ids = list(requirements[req_id].get("seed_clause_ids") or [])
+    clause_ids = list(requirements[req_id].get("clause_ids") or [])
+    allowed_clauses = set(seed_clause_ids) | set(clause_ids)
+    if not allowed_clauses:
+        allowed_clauses = {req_id}
+    if raw_spec_clause_ids:
+        if not isinstance(raw_spec_clause_ids, list) or not set(raw_spec_clause_ids).issubset(allowed_clauses):
+            raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
+        spec_clause_ids = raw_spec_clause_ids
+    else:
+        spec_clause_ids = seed_clause_ids or clause_ids
+    if not isinstance(spec_clause_ids, list):
         raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
     issue = row.get("issue")
     if status in {"partial", "violated"}:

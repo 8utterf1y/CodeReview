@@ -11,6 +11,7 @@ from specdiff.audit_runtime import (
     _lock_file_windows,
     _unlock_file_posix,
     _unlock_file_windows,
+    _symbol_family,
     assemble_result,
     audit_status,
     code_query,
@@ -63,6 +64,13 @@ class AuditRuntimeTests(unittest.TestCase):
         path = Path(self.temp.name) / name
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def _disable_batch_mode(self, workspace=None):
+        workspace = workspace or self.workspace
+        state = json.loads((workspace / "audit-state.json").read_text())
+        state["batch_mode"] = False
+        state["active_batch_id"] = None
+        (workspace / "audit-state.json").write_text(json.dumps(state), encoding="utf-8")
 
     def _frame_default(self, workspace=None, req_id="REQ-1"):
         workspace = workspace or self.workspace
@@ -210,11 +218,36 @@ class AuditRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, r"RFC 9999 fetch failed after retries"):
                 load_rfc_text("9999", cache, offline=False)
 
+    def test_prepare_rfcs_records_single_unresolved_reference_and_continues(self):
+        root = Path(self.temp.name)
+        inventory = root / "partial-rfcs.md"
+        inventory.write_text(
+            "| RFC | Title |\n| --- | --- |\n| RFC 9998 | Missing Protocol |\n| RFC 9999 | Example Protocol |\n",
+            encoding="utf-8",
+        )
+        cache = root / "partial-cache"
+        cache.mkdir()
+        (cache / "rfc9999.txt").write_text(
+            "RFC 9999 Example\n\n3.  Message Processing\n\nA receiver MUST validate the incoming message.\n",
+            encoding="utf-8",
+        )
+        payload = prepare_rfc_requirements(inventory, cache, offline=True)
+        self.assertEqual(payload["unresolved_references"][0]["rfc"], "9998")
+        self.assertEqual(len(payload["clauses"]), 1)
+
+    def test_production_checkers_are_not_benchmark_oracle(self):
+        from specdiff.checkers import run_all_checkers
+        text = (Path(__file__).parents[1] / "specdiff" / "checkers.py").read_text(encoding="utf-8")
+        for token in ("RFC4861-ND-OPTIONS", "RFC8415-DHCPV6", "RFC2710-MLD", "nd6_nbr.c"):
+            self.assertNotIn(token, text)
+        self.assertEqual(run_all_checkers(mock.Mock(), []), [])
+
     def test_simple_workflow_satisfied_finishes_without_reviewer(self):
         root = Path(self.temp.name)
         workspace = root / "simple-satisfied"
         out = root / "simple-satisfied.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "frame_obligations")
         self.assertIn("code_hints", action)
@@ -248,6 +281,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "finish-invariant"
         out = root / "finish-invariant.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         obligation_id = self._frame_default(workspace)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         submit_conclusion(workspace, self._payload("finish-submit.json", {
@@ -264,6 +298,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "simple-mismatch"
         out = root / "simple-mismatch.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         frame_action = next_action(workspace)
         framed = frame_obligations(workspace, self._payload("simple-mismatch-frame.json", {
             "requirement_id": "REQ-1",
@@ -302,6 +337,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(len(json.loads(out.read_text())["issues"]), 1)
 
     def test_dispatch_result_failed_when_state_unchanged(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         result = dispatch_result(self.workspace, self._payload("dispatch-unchanged.json", {
             "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
@@ -320,6 +356,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["recovery_action"], "call_audit_next")
 
     def test_committed_action_repeated_dispatch_result_is_idempotent(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         frame_obligations(self.workspace, self._payload("stale-complete-frame.json", {
             "requirement_id": "REQ-1",
@@ -336,6 +373,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(second["reason"], "already_committed")
 
     def test_action_lifecycle_commits_after_state_transition(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         self.assertEqual(action["action"]["status"], "dispatched")
         frame_obligations(self.workspace, self._payload("lifecycle-frame.json", {
@@ -352,6 +390,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(actions[0]["expected_after"], "framed")
 
     def test_conclusion_submit_then_dispatch_result_completed(self):
+        self._disable_batch_mode()
         frame_action = next_action(self.workspace)
         obligation_id = self._frame_default()
         dispatch_result(self.workspace, self._payload("conclusion-frame-dispatch.json", {
@@ -372,6 +411,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["current_state"], "submitted")
 
     def test_audit_next_does_not_create_new_action_when_outstanding_exists(self):
+        self._disable_batch_mode()
         first = next_action(self.workspace)
         second = next_action(self.workspace)
         actions = json.loads((self.workspace / "actions.json").read_text())["actions"]
@@ -381,6 +421,7 @@ class AuditRuntimeTests(unittest.TestCase):
 
     def test_first_dispatch_failure_retries_same_action(self):
         self._frame_default()
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         result = dispatch_result(self.workspace, self._payload("dispatch-retry.json", {
             "requirement_id": "REQ-1", "action": "investigate", "action_id": action["action_id"],
@@ -425,6 +466,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "failed-investigation"
         out = root / "failed-investigation.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         self._frame_default(workspace)
         action = next_action(workspace)
         dispatch_result(workspace, self._payload("failed-investigation-1.json", {
@@ -491,9 +533,9 @@ class AuditRuntimeTests(unittest.TestCase):
         reqs = root / "many-batch-reqs.json"
         rows = []
         for index in range(80):
-            topic = "retry" if index % 2 == 0 else "handler"
+            topic = "schedule_retry" if index % 2 == 0 else "handle_error"
             rows.append({
-                "id": f"PACK-{index:03d}", "document": f"RFC {6000 + index}",
+                "id": f"PACK-{index:03d}", "document": "RFC 9999",
                 "section": f"{index}.1", "quote": f"The service MUST {topic}.",
                 "normalized": f"The service {topic}s.", "keywords": [topic],
             })
@@ -502,6 +544,36 @@ class AuditRuntimeTests(unittest.TestCase):
         init_audit(self.repo, reqs, workspace)
         batches = json.loads((workspace / "batches.json").read_text())["batches"]
         self.assertLessEqual(len(batches), 30)
+
+    def test_batch_planner_does_not_force_merge_zero_affinity_topics(self):
+        root = Path(self.temp.name)
+        reqs = root / "unrelated-batch-reqs.json"
+        rows = [
+            {
+                "id": f"PACK-{index}", "document": f"DOC-{index}", "section": "1",
+                "quote": f"Requirement {index} MUST satisfy unique_{index}.",
+                "normalized": f"unique_{index}", "keywords": [f"unique_{index}"],
+            }
+            for index in range(35)
+        ]
+        reqs.write_text(json.dumps({"requirements": rows}), encoding="utf-8")
+        workspace = root / "unrelated-batches"
+        init_audit(self.repo, reqs, workspace)
+        batches = json.loads((workspace / "batches.json").read_text())["batches"]
+        self.assertGreater(len(batches), 30)
+
+    def test_single_requirement_uses_batch_workflow(self):
+        root = Path(self.temp.name)
+        workspace = root / "single-batch"
+        out = root / "single-batch.json"
+        init_audit(self.repo, self.requirements, workspace, out)
+        action = next_action(workspace)
+        self.assertEqual(action["next_action"], "investigate_batch")
+        self.assertEqual(action["batch"]["requirement_ids"], ["REQ-1"])
+
+    def test_symbol_family_preserves_protocol_digits(self):
+        self.assertEqual(_symbol_family("ip6_input"), "ip6")
+        self.assertEqual(_symbol_family("nd6_options"), "nd6")
 
     def test_code_affinity_groups_different_sections_by_locality(self):
         root = Path(self.temp.name)
@@ -659,6 +731,73 @@ class AuditRuntimeTests(unittest.TestCase):
         payload = json.loads(out.read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
 
+    def test_batch_result_autofills_seed_clause_ids(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-provenance-reqs.json"
+        reqs.write_text(json.dumps({"requirement_packs": [{
+            "id": "PACK-A", "document": "RFC 9999", "section": "3",
+            "quote": "A receiver MUST validate messages.", "normalized": "Validate messages.",
+            "keywords": ["validate"], "seed_clause_ids": ["RFC9999:3:p0001"],
+            "clause_ids": ["RFC9999:3:p0001", "RFC9999:3:p0002"],
+            "clauses": [
+                {"id": "RFC9999:3:p0001", "document": "RFC 9999", "section": "3", "quote": "A receiver MUST validate messages."},
+                {"id": "RFC9999:3:p0002", "document": "RFC 9999", "section": "3", "quote": "A receiver SHOULD log messages."},
+            ],
+        }]}), encoding="utf-8")
+        workspace = root / "batch-provenance"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        result = submit_batch_results(workspace, self._payload("batch-provenance-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [{
+                "requirement_id": "PACK-A", "status": "unknown",
+                "summary": "No evidence found.", "evidence_ids": [], "confidence": 0.1,
+            }],
+        }))
+        self.assertEqual(result["rejected_results"], [])
+        investigation = json.loads((workspace / "investigations.json").read_text())["investigations"][0]
+        self.assertEqual(investigation["spec_clause_ids"], ["RFC9999:3:p0001"])
+
+    def test_batch_result_accepts_subset_and_rejects_invalid_clause_only(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-clause-subset-reqs.json"
+        reqs.write_text(json.dumps({"requirement_packs": [
+            {
+                "id": "PACK-A", "document": "RFC 9999", "section": "3",
+                "quote": "A receiver MUST validate.", "normalized": "Validate.",
+                "keywords": ["validate"], "seed_clause_ids": ["RFC9999:3:p0001"],
+                "clause_ids": ["RFC9999:3:p0001", "RFC9999:3:p0002"],
+                "clauses": [{"id": "RFC9999:3:p0001"}, {"id": "RFC9999:3:p0002"}],
+            },
+            {
+                "id": "PACK-B", "document": "RFC 9999", "section": "4",
+                "quote": "A receiver MUST reject.", "normalized": "Reject.",
+                "keywords": ["reject"], "seed_clause_ids": ["RFC9999:4:p0001"],
+                "clause_ids": ["RFC9999:4:p0001"],
+                "clauses": [{"id": "RFC9999:4:p0001"}],
+            },
+        ]}), encoding="utf-8")
+        workspace = root / "batch-clause-subset"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        result = submit_batch_results(workspace, self._payload("batch-clause-subset-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {
+                    "requirement_id": "PACK-A", "status": "unknown", "summary": "Valid subset.",
+                    "spec_clause_ids": ["RFC9999:3:p0002"], "evidence_ids": [], "confidence": 0.1,
+                },
+                {
+                    "requirement_id": "PACK-B", "status": "unknown", "summary": "Invalid clause.",
+                    "spec_clause_ids": ["RFC9999:3:p0001"], "evidence_ids": [], "confidence": 0.1,
+                },
+            ],
+        }))
+        self.assertEqual([item["requirement_id"] for item in result["accepted_results"]], ["PACK-A"])
+        self.assertEqual(result["rejected_results"][0]["requirement_id"], "PACK-B")
+        investigation = json.loads((workspace / "investigations.json").read_text())["investigations"][0]
+        self.assertEqual(investigation["spec_clause_ids"], ["RFC9999:3:p0002"])
+
     def test_partial_batch_result_outputs_issue(self):
         root = Path(self.temp.name)
         reqs = root / "batch-partial-reqs.json"
@@ -695,6 +834,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "failed-review"
         out = root / "failed-review.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         obligation_id = self._frame_default(workspace)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         negative_query = code_query(workspace, "REQ-1", "investigator", "concept", query="alternate_retry")

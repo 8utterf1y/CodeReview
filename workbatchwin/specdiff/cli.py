@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
-from .checkers import run_all_checkers
 from .code_index import CodeIndex
 from .coverage import build_coverage_matrix, coverage_summary, rule_family_stats
 from .generic_scanners import run_generic_scanners
@@ -33,12 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["benchmark", "generic", "hybrid"],
+        choices=["generic"],
         default="generic",
-        help=(
-            "benchmark runs high-confidence benchmark/RFC checkers; generic runs reusable candidate scanners; "
-            "hybrid runs both. The default is generic."
-        ),
+        help="Run reusable generic candidate scanners. The OpenCode audit path uses the batch runtime.",
     )
     parser.add_argument(
         "--promote-generic",
@@ -64,18 +60,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     coverage_out = Path(args.coverage_out).resolve() if args.coverage_out else None
 
     try:
-        requirements = extract_requirements(docs, include_builtin_hints=args.mode in ("benchmark", "hybrid"))
+        requirements = extract_requirements(docs)
         index = CodeIndex(repo)
         findings = []
         candidates = []
         generic_findings = []
 
-        if args.mode in ("benchmark", "hybrid"):
-            findings.extend(run_all_checkers(index, requirements))
-        if args.mode in ("generic", "hybrid"):
-            candidates, generic_findings = run_generic_scanners(index, requirements)
-            if args.promote_generic:
-                findings.extend(generic_findings)
+        candidates, generic_findings = run_generic_scanners(index, requirements)
+        if args.promote_generic:
+            findings.extend(generic_findings)
 
         findings = [
             finding
@@ -87,7 +80,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         unverified = _unverified_requirements(coverage_records)
         payload = {
             "tool": "specdiff",
-            "artifact_type": "legacy_seed" if args.mode in ("benchmark", "hybrid") else "candidate_seed",
+            "artifact_type": "candidate_seed",
             "version": __version__,
             "mode": args.mode,
             "repo": str(repo),

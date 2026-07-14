@@ -28,23 +28,33 @@ def prepare_rfc_requirements(
     references = extract_rfc_references(inventory)
     documents: List[Dict[str, Any]] = []
     excluded: List[Dict[str, str]] = []
+    unresolved: List[Dict[str, str]] = []
     for number, title in references:
         if _is_vocabulary_reference(title):
             excluded.append({"rfc": number, "title": title, "reason": "normative vocabulary, not implementation behavior"})
             continue
-        text, source = load_rfc_text(number, cache_dir, offline=offline)
+        try:
+            text, source = load_rfc_text(number, cache_dir, offline=offline)
+        except (FileNotFoundError, TimeoutError, OSError) as exc:
+            unresolved.append({"rfc": number, "title": title, "reason": str(exc)})
+            continue
         clauses = extract_rfc_corpus_clauses(number, title, text, max_per_rfc=max_per_rfc)
         metadata = extract_rfc_metadata(number, text)
         documents.append({
             "document_id": f"RFC{number}", "rfc": number, "title": title, **source, **metadata,
             "clauses_emitted": len(clauses), "clauses": clauses,
         })
-    return build_requirement_pack_artifact(
+    if not documents and unresolved:
+        detail = "; ".join(f"RFC {item['rfc']}: {item['reason']}" for item in unresolved[:5])
+        raise TimeoutError(f"all RFC fetches failed or were unavailable: {detail}")
+    artifact = build_requirement_pack_artifact(
         inventory=str(inventory.resolve()),
         references=references,
         documents=documents,
         excluded_references=excluded,
     )
+    artifact["unresolved_references"] = unresolved
+    return artifact
 
 
 def extract_rfc_references(path: Path) -> List[Tuple[str, str]]:
