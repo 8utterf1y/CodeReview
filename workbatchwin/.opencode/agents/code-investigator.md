@@ -32,7 +32,7 @@ When `next_action` is `investigate_batch`:
 - Investigate only the supplied `batch`.
 - First perform shared implementation discovery for the whole batch.
 - Start from `batch.code_hints.components`, `batch.code_hints.symbols`, `batch.code_hints.files`, and `batch.code_hints.symbol_families`.
-- Use `code_search` with `requirementId` set to the `batch_id` for shared discovery and shared evidence.
+- `code_search` is automatically scoped to the active batch; omit `requirementId` during shared discovery.
 - Prefer navigation order: component or repo_map -> symbol -> references/callers/callees -> source.
 - Do not restart broad repository search for each Pack.
 - Use Pack-specific search only when shared evidence is insufficient.

@@ -572,6 +572,52 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(len(result["accepted_results"]), 2)
         self.assertEqual(result["rejected_results"], [])
 
+    def test_active_batch_code_search_needs_no_requirement_id(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-alias-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler MUST retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-alias"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        query = code_query(workspace, "", "investigator", "concept", query="schedule_retry")
+        self.assertEqual(query["requirement_id"], action["batch_id"])
+        self.assertEqual(query["batch_id"], action["batch_id"])
+        evidence = json.loads((workspace / "evidence.jsonl").read_text().splitlines()[0])
+        self.assertEqual(evidence["batch_id"], action["batch_id"])
+
+    def test_wrong_pack_or_semantic_id_does_not_break_active_batch_discovery(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-wrong-id-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+            {"id": "PACK-B", "document": "spec", "section": "2", "quote": "The handler MUST retry.", "normalized": "Retry handler.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-wrong-id"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        query = code_query(workspace, "MLD-002", "investigator", "concept", query="schedule_retry")
+        self.assertEqual(query["requirement_id"], action["batch_id"])
+        self.assertEqual(query["parameters"]["requested_requirement_id"], "MLD-002")
+        result = submit_batch_results(workspace, self._payload("batch-wrong-id-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {"requirement_id": "PACK-A", "status": "covered", "summary": "Shared evidence.", "spec_clause_ids": [], "evidence_ids": query["evidence_ids"], "confidence": 0.8},
+                {"requirement_id": "PACK-B", "status": "covered", "summary": "Same shared evidence.", "spec_clause_ids": [], "evidence_ids": query["evidence_ids"], "confidence": 0.8},
+            ],
+        }))
+        self.assertEqual(len(result["accepted_results"]), 2)
+
+    def test_text_query_falls_back_when_rg_is_missing(self):
+        with mock.patch("specdiff.audit_runtime.subprocess.run", side_effect=FileNotFoundError()):
+            self._frame_default()
+            query = code_query(self.workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
+        self.assertTrue(query["evidence_ids"])
+        evidence = json.loads((self.workspace / "evidence.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(evidence["backend"], "python_text_search")
+
     def test_batch_query_budget_limits_broad_text_search(self):
         root = Path(self.temp.name)
         reqs = root / "batch-budget-reqs.json"

@@ -477,7 +477,7 @@ def verification_conclusion_context(workspace: Path, requirement_id: str) -> Dic
 
 
 def code_query(
-    workspace: Path, requirement_id: str, role: str, mode: str, query: str = "",
+    workspace: Path, requirement_id: str = "", role: str = "investigator", mode: str = "", query: str = "",
     path: str = "", start: int = 1, end: int = 200, limit: int = 50,
 ) -> Dict[str, Any]:
     with _audit_lock(workspace):
@@ -487,7 +487,7 @@ def code_query(
 
 
 def _code_query(
-    workspace: Path, requirement_id: str, role: str, mode: str, query: str = "",
+    workspace: Path, requirement_id: str = "", role: str = "investigator", mode: str = "", query: str = "",
     path: str = "", start: int = 1, end: int = 200, limit: int = 50,
 ) -> Dict[str, Any]:
     state = _state(workspace)
@@ -530,10 +530,11 @@ def _code_query(
     else:
         tool_status = "tool_limited"
         limitation = f"{mode} requires the later AST/SCIP/CodeQL index layer"
+    record_requirement_id = query_scope.get("batch_id") or requirement_id
     query_record = _record_query(
-        workspace, state, requirement_id, role, mode,
+        workspace, state, record_requirement_id, role, mode,
         {"query": query, "path": path, "start": start, "end": end, "limit": limit,
-         "requested_mode": requested_mode},
+         "requested_mode": requested_mode, "requested_requirement_id": requirement_id},
         [_materialize_result(repo, item) for item in results], tool_status, limitation,
         coverage=coverage, batch_id=query_scope.get("batch_id"),
     )
@@ -541,12 +542,16 @@ def _code_query(
 
 
 def _query_scope(workspace: Path, state: Dict[str, Any], requirement_id: str, role: str) -> Dict[str, Any]:
-    if requirement_id in state["requirements"]:
+    if requirement_id and requirement_id in state["requirements"]:
         return {"kind": "requirement", "requirement_id": requirement_id}
     active_batch = state.get("active_batch_id")
-    if role == "investigator" and active_batch and requirement_id == active_batch:
+    if role == "investigator" and active_batch:
         batch = _batch_by_id(workspace, active_batch)
-        return {"kind": "batch", "batch_id": active_batch, "requirement_ids": batch["requirement_ids"]}
+        return {
+            "kind": "batch", "batch_id": active_batch,
+            "requirement_ids": batch["requirement_ids"],
+            "requested_requirement_id": requirement_id,
+        }
     _require_requirement(state, requirement_id)
     return {"kind": "requirement", "requirement_id": requirement_id}
 
@@ -765,8 +770,10 @@ def _rg_query(repo: Path, query: str, limit: int) -> List[Dict[str, Any]]:
             ["rg", "--json", "--ignore-case", "--max-count", str(limit), query, str(repo)],
             capture_output=True, text=True, timeout=120,
         )
+    except FileNotFoundError:
+        return _python_text_query(repo, query, limit)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError(f"rg query failed: {exc}") from exc
+        raise ValueError(f"text query failed: {exc}") from exc
     rows: List[Dict[str, Any]] = []
     for line in result.stdout.splitlines():
         try:
@@ -788,6 +795,40 @@ def _rg_query(repo: Path, query: str, limit: int) -> List[Dict[str, Any]]:
         })
         if len(rows) >= limit:
             break
+    return rows
+
+
+def _python_text_query(repo: Path, query: str, limit: int) -> List[Dict[str, Any]]:
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error:
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+    rows: List[Dict[str, Any]] = []
+    skip_dirs = {".git", ".specdiff", "node_modules", ".venv", "venv", "__pycache__", "dist"}
+    for path in sorted(repo.rglob("*")):
+        if len(rows) >= limit:
+            break
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(repo).parts
+        if any(part in skip_dirs for part in rel_parts):
+            continue
+        try:
+            if path.stat().st_size > 2_000_000:
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        rel = str(path.relative_to(repo))
+        for line_number, line in enumerate(lines, 1):
+            if pattern.search(line):
+                rows.append({
+                    "path": rel, "line": line_number,
+                    "quote": line.strip()[:500], "backend": "python_text_search",
+                    "precision": "text_fallback",
+                })
+                if len(rows) >= limit:
+                    break
     return rows
 
 

@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 export default tool({
   description: "Search indexed code for an active batch or one requirement. Query IDs and evidence IDs are automatic.",
   args: {
-    requirementId: tool.schema.string().min(1),
+    requirementId: tool.schema.string().min(1).optional(),
     operation: tool.schema.enum(["text", "symbol", "references", "callers", "callees", "source", "repo_map", "component", "build"]),
     term: tool.schema.string().optional(),
     path: tool.schema.string().optional(),
@@ -18,7 +18,8 @@ export default tool({
   async execute(args, context) {
     const workspace = join(context.directory, ".specdiff", "audit");
     const mode = args.operation === "text" ? "concept" : args.operation;
-    const command = ["audit-query", "--workspace", workspace, "--requirement-id", args.requirementId, "--role", "investigator", "--mode", mode];
+    const command = ["audit-query", "--workspace", workspace, "--role", "investigator", "--mode", mode];
+    if (args.requirementId) command.push("--requirement-id", args.requirementId);
     if (args.term) command.push("--query", args.term);
     if (args.path) command.push("--path", args.path);
     if (args.line !== undefined) {

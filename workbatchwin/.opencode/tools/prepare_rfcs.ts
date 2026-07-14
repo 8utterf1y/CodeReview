@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import { execFile } from "node:child_process";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -21,8 +21,8 @@ export default tool({
     const command = ["-m", "specdiff.tool_api", "prepare-rfcs", "--inventory", inventory, "--out", out, "--cache-dir", cache];
     if (args.maxPerRfc !== undefined) command.push("--max-per-rfc", String(args.maxPerRfc));
     if (args.offline) command.push("--offline");
-    const homeDir = process.env.HOME || process.env.USERPROFILE;
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? `${homeDir}/.config/opencode/specdiff-runtime` : undefined, process.env.PYTHONPATH].filter(Boolean).join(delimiter);
+    const homeDir = process.env.USERPROFILE;
+  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? join(homeDir, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
     try {
       const { stdout } = await execFileAsync(pythonBin(), command, { cwd: repo, env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
       return stdout;
@@ -34,5 +34,5 @@ export default tool({
 });
 
 function pythonBin() {
-  return process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+  return "python";
 }

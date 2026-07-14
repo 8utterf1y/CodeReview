@@ -145,7 +145,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("audit-query")
     p.add_argument("--workspace", required=True)
-    p.add_argument("--requirement-id", required=True)
+    p.add_argument("--requirement-id", default="")
     p.add_argument("--role", choices=["investigator", "verifier"], required=True)
     p.add_argument("--mode", required=True)
     p.add_argument("--query", default="")

@@ -2,7 +2,7 @@ import { tool } from "@opencode-ai/plugin";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -47,12 +47,12 @@ export default tool({
 });
 
 async function run(args: string[]) {
-  const homeDir = process.env.HOME || process.env.USERPROFILE;
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? `${homeDir}/.config/opencode/specdiff-runtime` : undefined, process.env.PYTHONPATH].filter(Boolean).join(delimiter);
+  const homeDir = process.env.USERPROFILE;
+  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? join(homeDir, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
   const { stdout } = await execFileAsync(pythonBin(), ["-m", "specdiff.tool_api", ...args], { env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
   return stdout;
 }
 
 function pythonBin() {
-  return process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+  return "python";
 }
