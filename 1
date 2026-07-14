@@ -1,0 +1,15 @@
+作品以zip压缩包形式交付，文件名以 {赛道ID}{题号}{队名}.zip 格式命名，难题赛道ID为01，竞赛赛道ID为02，例如：01_01_攻坚克难队.zip。压缩包解压后应以同名的文件夹为根目录，目录内格式以及关键交付件如下表：
+
+路径	类型	要求	说明
+/INSTRUCTION.md	文件	必选	作品运行的入口，平台通过加载该Markdown执行作品运行过程，验证用例通过性
+/work	目录	必选	用于存放作品可运行交付件的目录，可以存放Skill/Agent/MCP等
+/work/skills/{your-skill-name}/SKILL.md	文件	可选	如提交Skill，按Skill规范存放Skill的目录和入口文件
+/work/agents/{your-subagent-name}.md	文件	可选	如提交主Agent，在agents目录下存放，并在INSTRUCTION.md中使用
+/work/subagent/{your-subagent-name}.md	文件	可选	如提交subagent，在subagent目录下存放，并在INSTRUCTION.md中使用
+/result	目录	必选	用于存放作品自验证的记录
+/result/screenshot	目录	可选	存放作品运行成功、用例通过的截图文件
+/result/output.md	文件	必选	记录作品运行成功的输出信息，如有图片，以Markdown规范引用
+/logs	目录	必选	用于存放推理过程的记录和交互信息
+/logs/interaction.md	文件	必选	记录选手与作品人工交互的记录，如全程无干预，留空
+/logs/trace	目录	必选	用于存放推理过程日志
+/problem_statement	目录	可选	对于赛道一，难题赛道，如选择自行出题，此目录必须存在，目录内以PROBLEM.md主文件描述自行出题的题目要求
