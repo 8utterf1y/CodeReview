@@ -27,11 +27,42 @@ QUERY_MODE_ALIASES = {
 MAX_SUBAGENT_ATTEMPTS = 2
 TARGET_BATCHES = 24
 HARD_MAX_BATCHES = 30
+<<<<<<< HEAD
 MIN_TOPIC_MERGE_SCORE = 4.0
 MAX_BATCH_PACKET_PACKS = 20
 MAX_BATCH_PACKET_CLAUSES = 160
 MAX_BATCH_QUERIES = 24
 MAX_BATCH_TEXT_QUERIES = 6
+=======
+MIN_TOPIC_MERGE_SCORE = 6.0
+MAX_BATCH_PACKET_PACKS = 12
+MAX_BATCH_PACKET_CLAUSES = 160
+MAX_BATCH_QUERIES = 70
+MAX_BATCH_TEXT_QUERIES = 30
+LOW_VALUE_SYMBOL_FAMILIES = {
+    "get", "set", "test", "member", "default", "include", "lib", "app", "src", "cmd",
+    "cache", "freebsd", "contrib", "ngx", "redis", "rte", "uni", "server", "client",
+    "main", "init", "create", "delete", "update", "find", "read", "write",
+    "generate", "translate", "accept", "hook", "linux", "ngbe", "dpdk", "drivers",
+    "actions", "port", "device", "bindings", "common", "sys", "http", "nginx",
+    "openzfs", "agents", "free",
+    "setdestaddress", "libfdt", "fdt", "cpswp", "pcd",
+}
+LOW_VALUE_COMPONENT_PATTERNS = (
+    r"^app/",
+    r"^freebsd/contrib(?:/|$)",
+    r"^dpdk/drivers(?:/|$)",
+    r"(^|/)(?:test|tests|example|examples|doc|docs)(?:/|$)",
+)
+HIGH_VALUE_COMPONENT_PREFIXES = (
+    "freebsd/netinet6",
+    "freebsd/netinet",
+    "freebsd/net",
+    "dpdk/lib",
+    "lib",
+    "adapter",
+)
+>>>>>>> bc85301 (workbatchwin)
 
 
 def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Optional[Path] = None) -> Dict[str, Any]:
@@ -737,13 +768,83 @@ def _assemble_result(workspace: Path, out: Path) -> Dict[str, Any]:
         "pack_coverage": _pack_coverage(workspace, records, verifications),
         "audit_state": {"stage": "assembled", "requirements_sha256": state["requirements_sha256"]},
     }
-    _write_json(out, payload)
+    competition_payload = _competition_output(payload)
+    _write_json(out, competition_payload)
+    full_out = out.with_suffix(".full.json")
+    _write_json(full_out, payload)
     sarif_out = out.with_suffix(".sarif")
     _write_sarif(sarif_out, payload)
     state["stage"] = "assembled"
     state["assembled_output"] = str(out.resolve())
+    state["assembled_full_report"] = str(full_out.resolve())
     _save_state(workspace, state)
-    return {"assembled": True, "out": str(out.resolve()), "sarif": str(sarif_out.resolve()), "issues": len(issues), "status_counts": dict(counts)}
+    return {
+        "assembled": True, "out": str(out.resolve()), "full_report": str(full_out.resolve()),
+        "sarif": str(sarif_out.resolve()), "issues": len(issues), "status_counts": dict(counts),
+    }
+
+
+def _competition_output(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {"issues": [_competition_issue(issue) for issue in payload.get("issues", [])]}
+
+
+def _competition_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
+    spec = issue.get("spec_evidence") or {}
+    code = _primary_code_evidence(issue)
+    return {
+        "id": issue.get("id"),
+        "title": issue.get("title") or "Specification/code inconsistency",
+        "rfc_reference": _rfc_reference(spec),
+        "violation_level": _violation_level(issue, spec),
+        "file": code.get("path"),
+        "line": code.get("line") or code.get("start_line"),
+        "evidence": {
+            "code_snippet": code.get("quote") or "",
+            "rfc_requirement": spec.get("quote") or "",
+        },
+    }
+
+
+def _primary_code_evidence(issue: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = issue.get("code_evidence") or []
+    if not evidence:
+        return {}
+    exact = [item for item in evidence if item.get("precision") in {"exact_source", "exact_source_span", "compiler_precise"}]
+    rows = exact or evidence
+    rows = sorted(
+        rows,
+        key=lambda item: (
+            0 if item.get("path") else 1,
+            int(item.get("line") or item.get("start_line") or 10**9),
+            str(item.get("evidence_id") or ""),
+        ),
+    )
+    return rows[0]
+
+
+def _rfc_reference(spec: Dict[str, Any]) -> str:
+    document = str(spec.get("document") or "unknown").strip()
+    section = str(spec.get("section") or "").strip()
+    if section and section.lower() != "unknown":
+        return f"{document} §{section}"
+    return document
+
+
+def _violation_level(issue: Dict[str, Any], spec: Dict[str, Any]) -> str:
+    haystack = " ".join(
+        str(value or "") for value in (
+            issue.get("description"), issue.get("title"), spec.get("quote"), spec.get("section")
+        )
+    ).upper()
+    for level in ("MUST NOT", "SHOULD NOT", "MUST", "SHOULD", "MAY"):
+        if re.search(rf"\b{re.escape(level)}\b", haystack):
+            return level
+    severity = str(issue.get("severity") or "").lower()
+    if severity in {"critical", "high"}:
+        return "MUST"
+    if severity == "medium":
+        return "SHOULD"
+    return "MAY"
 
 
 def _normalize_requirements(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1252,11 +1353,13 @@ def _pack_code_affinity(
                     family = _symbol_family(part)
                     if family:
                         family_scores[family] += 1
+        components = _rank_components(component_scores, component_limit)
+        families = _rank_symbol_families(family_scores, 8)
         return {
-            "components": [name for name, _score in component_scores.most_common(component_limit)],
+            "components": components,
             "symbols": [name for name, _score in symbol_scores.most_common(symbol_limit)],
             "files": [name for name, _score in file_scores.most_common(file_limit)],
-            "symbol_families": [name for name, _score in family_scores.most_common(8)],
+            "symbol_families": families,
             "source": "sqlite_codefacts",
         }
     finally:
@@ -1269,6 +1372,39 @@ def _symbol_family(name: str) -> str:
         compact = re.sub(r"[^A-Za-z0-9]+", "", name.lower())
         return compact[:12] if len(compact) >= 3 else ""
     return tokens[0][:16]
+<<<<<<< HEAD
+=======
+
+
+def _rank_components(scores: Counter[str], limit: int) -> List[str]:
+    ranked = sorted(scores.items(), key=lambda item: (_component_rank_score(item[0], item[1]), item[0]), reverse=True)
+    useful = [name for name, _score in ranked if not _is_low_value_component(name)]
+    return useful[:limit]
+
+
+def _component_rank_score(component: str, score: int) -> float:
+    value = float(score)
+    if _is_high_value_component(component):
+        value += 20.0
+    if _is_low_value_component(component):
+        value -= 50.0
+    return value
+
+
+def _is_high_value_component(component: str) -> bool:
+    return any(component == prefix or component.startswith(f"{prefix}/") for prefix in HIGH_VALUE_COMPONENT_PREFIXES)
+
+
+def _is_low_value_component(component: str) -> bool:
+    return any(re.search(pattern, component) for pattern in LOW_VALUE_COMPONENT_PATTERNS)
+
+
+def _rank_symbol_families(scores: Counter[str], limit: int) -> List[str]:
+    return [
+        name for name, _score in scores.most_common()
+        if name not in LOW_VALUE_SYMBOL_FAMILIES
+    ][:limit]
+>>>>>>> bc85301 (workbatchwin)
 
 
 def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
@@ -1367,12 +1503,20 @@ def _build_audit_batches(workspace: Path, requirements: List[Dict[str, Any]]) ->
 
 
 def _initial_topic_key(req: Dict[str, Any], affinity: Dict[str, Any]) -> str:
+    document = _document_group(req)
     component = (affinity.get("components") or ["unknown"])[0]
     family = (affinity.get("symbol_families") or ["general"])[0]
     if component == "unknown":
-        document = re.sub(r"[^A-Za-z0-9]+", "", str(req.get("document") or "DOC")).upper() or "DOC"
         return f"{document}|{family}"
-    return f"{component}|{family}"
+    return f"{document}|{component}|{family}"
+
+
+def _document_group(req: Dict[str, Any]) -> str:
+    document = str(req.get("document") or "DOC")
+    match = re.search(r"\bRFC\s*([0-9]{3,5})\b", document, re.I)
+    if match:
+        return f"RFC{match.group(1)}"
+    return re.sub(r"[^A-Za-z0-9]+", "", document).upper()[:24] or "DOC"
 
 
 def _make_topic(key: str, rows: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -1430,18 +1574,46 @@ def _split_oversized_topics(topics: List[Dict[str, Any]], affinities: Dict[str, 
                 len(chunk) >= MAX_BATCH_PACKET_PACKS
                 or clause_count + req_clause_count > MAX_BATCH_PACKET_CLAUSES
             ):
+<<<<<<< HEAD
                 result.append(_make_topic(f"{topic['key']}#{part}", chunk, affinities))
+=======
+                result.append(_make_topic(_chunk_topic_key(chunk, affinities, part), chunk, affinities))
+>>>>>>> bc85301 (workbatchwin)
                 part += 1
                 chunk = []
                 clause_count = 0
             chunk.append(req)
             clause_count += req_clause_count
         if chunk:
+<<<<<<< HEAD
             suffix = f"#{part}" if part > 1 else ""
             result.append(_make_topic(f"{topic['key']}{suffix}", chunk, affinities))
     return result
 
 
+=======
+            result.append(_make_topic(_chunk_topic_key(chunk, affinities, part if part > 1 else 0), chunk, affinities))
+    return result
+
+
+def _chunk_topic_key(rows: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]], part: int) -> str:
+    documents = Counter(_document_group(req) for req in rows)
+    components: Counter[str] = Counter()
+    families: Counter[str] = Counter()
+    for req in rows:
+        affinity = affinities[req["id"]]
+        for value in affinity.get("components") or []:
+            components[value] += 1
+        for value in affinity.get("symbol_families") or []:
+            families[value] += 1
+    document = documents.most_common(1)[0][0] if documents else "DOC"
+    component = components.most_common(1)[0][0] if components else "unknown"
+    family = families.most_common(1)[0][0] if families else "general"
+    suffix = f"#{part}" if part else ""
+    return f"{document}|{component}|{family}{suffix}"
+
+
+>>>>>>> bc85301 (workbatchwin)
 def _topic_merge_score(left: Dict[str, Any], right: Dict[str, Any]) -> float:
     score = 0.0
     left_component = next(iter(left["components"]), None)

@@ -27,11 +27,42 @@ QUERY_MODE_ALIASES = {
 MAX_SUBAGENT_ATTEMPTS = 2
 TARGET_BATCHES = 24
 HARD_MAX_BATCHES = 30
+<<<<<<< HEAD
 MIN_TOPIC_MERGE_SCORE = 4.0
 MAX_BATCH_PACKET_PACKS = 20
 MAX_BATCH_PACKET_CLAUSES = 160
 MAX_BATCH_QUERIES = 24
 MAX_BATCH_TEXT_QUERIES = 6
+=======
+MIN_TOPIC_MERGE_SCORE = 6.0
+MAX_BATCH_PACKET_PACKS = 12
+MAX_BATCH_PACKET_CLAUSES = 160
+MAX_BATCH_QUERIES = 40
+MAX_BATCH_TEXT_QUERIES = 12
+LOW_VALUE_SYMBOL_FAMILIES = {
+    "get", "set", "test", "member", "default", "include", "lib", "app", "src", "cmd",
+    "cache", "freebsd", "contrib", "ngx", "redis", "rte", "uni", "server", "client",
+    "main", "init", "create", "delete", "update", "find", "read", "write",
+    "generate", "translate", "accept", "hook", "linux", "ngbe", "dpdk", "drivers",
+    "actions", "port", "device", "bindings", "common", "sys", "http", "nginx",
+    "openzfs", "agents", "free",
+    "setdestaddress", "libfdt", "fdt", "cpswp", "pcd",
+}
+LOW_VALUE_COMPONENT_PATTERNS = (
+    r"^app/",
+    r"^freebsd/contrib(?:/|$)",
+    r"^dpdk/drivers(?:/|$)",
+    r"(^|/)(?:test|tests|example|examples|doc|docs)(?:/|$)",
+)
+HIGH_VALUE_COMPONENT_PREFIXES = (
+    "freebsd/netinet6",
+    "freebsd/netinet",
+    "freebsd/net",
+    "dpdk/lib",
+    "lib",
+    "adapter",
+)
+>>>>>>> bc85301 (workbatchwin)
 
 
 def init_audit(repo: Path, requirements_path: Path, workspace: Path, out: Optional[Path] = None) -> Dict[str, Any]:
@@ -425,6 +456,7 @@ def submit_simple_review(workspace: Path, payload_path: Path) -> Dict[str, Any]:
 
 
 def finish_audit(workspace: Path) -> Dict[str, Any]:
+<<<<<<< HEAD
     with _audit_lock(workspace):
         state = _state(workspace)
         output = state.get("requested_output")
@@ -444,6 +476,14 @@ def finish_audit(workspace: Path) -> Dict[str, Any]:
                 )
         _refresh_stage(state)
         _save_state(workspace, state)
+=======
+    state = _state(workspace)
+    output = state.get("requested_output")
+    if not output:
+        raise ValueError("audit was initialized without an output path")
+    if not state.get("assembly_allowed"):
+        raise ValueError("state invariant error: audit_finish called before audit_next returned finish")
+>>>>>>> bc85301 (workbatchwin)
     return assemble_result(workspace, Path(output))
 
 
@@ -1073,7 +1113,11 @@ def _obligation_id(req_id: str, description: str, source_clause_ids: List[str]) 
 
 def _spec_evidence_for_issue(req: Dict[str, Any], investigation: Dict[str, Any]) -> List[Dict[str, Any]]:
     obligations = {item["id"]: item for item in investigation.get("obligations", [])}
+<<<<<<< HEAD
     clause_ids = list(investigation.get("spec_clause_ids") or [])
+=======
+    clause_ids = []
+>>>>>>> bc85301 (workbatchwin)
     for result in investigation.get("obligation_results") or investigation.get("findings") or []:
         if result.get("status") not in {"contradicted", "partial", "not_found"}:
             continue
@@ -1252,11 +1296,21 @@ def _pack_code_affinity(
                     family = _symbol_family(part)
                     if family:
                         family_scores[family] += 1
+<<<<<<< HEAD
         return {
             "components": [name for name, _score in component_scores.most_common(component_limit)],
             "symbols": [name for name, _score in symbol_scores.most_common(symbol_limit)],
             "files": [name for name, _score in file_scores.most_common(file_limit)],
             "symbol_families": [name for name, _score in family_scores.most_common(8)],
+=======
+        components = _rank_components(component_scores, component_limit)
+        families = _rank_symbol_families(family_scores, 8)
+        return {
+            "components": components,
+            "symbols": [name for name, _score in symbol_scores.most_common(symbol_limit)],
+            "files": [name for name, _score in file_scores.most_common(file_limit)],
+            "symbol_families": families,
+>>>>>>> bc85301 (workbatchwin)
             "source": "sqlite_codefacts",
         }
     finally:
@@ -1271,6 +1325,39 @@ def _symbol_family(name: str) -> str:
     return tokens[0][:16]
 
 
+<<<<<<< HEAD
+=======
+def _rank_components(scores: Counter[str], limit: int) -> List[str]:
+    ranked = sorted(scores.items(), key=lambda item: (_component_rank_score(item[0], item[1]), item[0]), reverse=True)
+    useful = [name for name, _score in ranked if not _is_low_value_component(name)]
+    return useful[:limit]
+
+
+def _component_rank_score(component: str, score: int) -> float:
+    value = float(score)
+    if _is_high_value_component(component):
+        value += 20.0
+    if _is_low_value_component(component):
+        value -= 50.0
+    return value
+
+
+def _is_high_value_component(component: str) -> bool:
+    return any(component == prefix or component.startswith(f"{prefix}/") for prefix in HIGH_VALUE_COMPONENT_PREFIXES)
+
+
+def _is_low_value_component(component: str) -> bool:
+    return any(re.search(pattern, component) for pattern in LOW_VALUE_COMPONENT_PATTERNS)
+
+
+def _rank_symbol_families(scores: Counter[str], limit: int) -> List[str]:
+    return [
+        name for name, _score in scores.most_common()
+        if name not in LOW_VALUE_SYMBOL_FAMILIES
+    ][:limit]
+
+
+>>>>>>> bc85301 (workbatchwin)
 def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
     text = " ".join(
         str(requirement.get(field) or "")
@@ -1367,12 +1454,29 @@ def _build_audit_batches(workspace: Path, requirements: List[Dict[str, Any]]) ->
 
 
 def _initial_topic_key(req: Dict[str, Any], affinity: Dict[str, Any]) -> str:
+<<<<<<< HEAD
     component = (affinity.get("components") or ["unknown"])[0]
     family = (affinity.get("symbol_families") or ["general"])[0]
     if component == "unknown":
         document = re.sub(r"[^A-Za-z0-9]+", "", str(req.get("document") or "DOC")).upper() or "DOC"
         return f"{document}|{family}"
     return f"{component}|{family}"
+=======
+    document = _document_group(req)
+    component = (affinity.get("components") or ["unknown"])[0]
+    family = (affinity.get("symbol_families") or ["general"])[0]
+    if component == "unknown":
+        return f"{document}|{family}"
+    return f"{document}|{component}|{family}"
+
+
+def _document_group(req: Dict[str, Any]) -> str:
+    document = str(req.get("document") or "DOC")
+    match = re.search(r"\bRFC\s*([0-9]{3,5})\b", document, re.I)
+    if match:
+        return f"RFC{match.group(1)}"
+    return re.sub(r"[^A-Za-z0-9]+", "", document).upper()[:24] or "DOC"
+>>>>>>> bc85301 (workbatchwin)
 
 
 def _make_topic(key: str, rows: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -1430,18 +1534,46 @@ def _split_oversized_topics(topics: List[Dict[str, Any]], affinities: Dict[str, 
                 len(chunk) >= MAX_BATCH_PACKET_PACKS
                 or clause_count + req_clause_count > MAX_BATCH_PACKET_CLAUSES
             ):
+<<<<<<< HEAD
                 result.append(_make_topic(f"{topic['key']}#{part}", chunk, affinities))
+=======
+                result.append(_make_topic(_chunk_topic_key(chunk, affinities, part), chunk, affinities))
+>>>>>>> bc85301 (workbatchwin)
                 part += 1
                 chunk = []
                 clause_count = 0
             chunk.append(req)
             clause_count += req_clause_count
         if chunk:
+<<<<<<< HEAD
             suffix = f"#{part}" if part > 1 else ""
             result.append(_make_topic(f"{topic['key']}{suffix}", chunk, affinities))
     return result
 
 
+=======
+            result.append(_make_topic(_chunk_topic_key(chunk, affinities, part if part > 1 else 0), chunk, affinities))
+    return result
+
+
+def _chunk_topic_key(rows: List[Dict[str, Any]], affinities: Dict[str, Dict[str, Any]], part: int) -> str:
+    documents = Counter(_document_group(req) for req in rows)
+    components: Counter[str] = Counter()
+    families: Counter[str] = Counter()
+    for req in rows:
+        affinity = affinities[req["id"]]
+        for value in affinity.get("components") or []:
+            components[value] += 1
+        for value in affinity.get("symbol_families") or []:
+            families[value] += 1
+    document = documents.most_common(1)[0][0] if documents else "DOC"
+    component = components.most_common(1)[0][0] if components else "unknown"
+    family = families.most_common(1)[0][0] if families else "general"
+    suffix = f"#{part}" if part else ""
+    return f"{document}|{component}|{family}{suffix}"
+
+
+>>>>>>> bc85301 (workbatchwin)
 def _topic_merge_score(left: Dict[str, Any], right: Dict[str, Any]) -> float:
     score = 0.0
     left_component = next(iter(left["components"]), None)
@@ -1574,6 +1706,7 @@ def _validate_one_batch_result(
         item = evidence.get(evidence_id)
         if not item or not _evidence_allowed_for_batch_result(item, batch["batch_id"], req_id):
             raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
+<<<<<<< HEAD
     raw_spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
     seed_clause_ids = list(requirements[req_id].get("seed_clause_ids") or [])
     clause_ids = list(requirements[req_id].get("clause_ids") or [])
@@ -1587,6 +1720,12 @@ def _validate_one_batch_result(
     else:
         spec_clause_ids = seed_clause_ids or clause_ids
     if not isinstance(spec_clause_ids, list):
+=======
+    spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
+    spec_clause_ids = spec_clause_ids or []
+    allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
+    if not isinstance(spec_clause_ids, list) or not set(spec_clause_ids).issubset(allowed_clauses):
+>>>>>>> bc85301 (workbatchwin)
         raise ValueError(f"{req_id}: spec_clause_ids must belong to the Pack")
     issue = row.get("issue")
     if status in {"partial", "violated"}:

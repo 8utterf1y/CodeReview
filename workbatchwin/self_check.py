@@ -1,64 +1,56 @@
 from __future__ import annotations
 
-import json
+import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-SELF_CHECK_DIR = Path(tempfile.gettempdir()) / "specdiff-self-check"
-OUT = SELF_CHECK_DIR / "issues.json"
-REPORT = SELF_CHECK_DIR / "report.md"
+
+
+REQUIRED_PATHS = [
+    "INSTRUCTION.md",
+    "技术报告.md",
+    "提交资料清单.md",
+    ".opencode/commands/spec-audit.md",
+    ".opencode/agents/spec-compliance-orchestrator.md",
+    ".opencode/agents/code-investigator.md",
+    ".opencode/tools/audit_start.ts",
+    ".opencode/tools/audit_next.ts",
+    ".opencode/tools/code_search.ts",
+    ".opencode/tools/submit_batch_results.ts",
+    "skills/spec-code-consistency/SKILL.md",
+    "specdiff/tool_api.py",
+    "specdiff/audit_runtime.py",
+    "specdiff/rfc_prepare.py",
+]
 
 
 def main() -> int:
-    SELF_CHECK_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        "-m",
-        "specdiff",
-        "--repo",
-        str(ROOT / "testdata" / "repo"),
-        "--docs",
-        str(ROOT / "testdata" / "docs" / "benchmark.md"),
-        "--out",
-        str(OUT),
-        "--report",
-        str(REPORT),
-    ]
-    result = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True)
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr)
-        return result.returncode
-
-    payload = json.loads(OUT.read_text(encoding="utf-8"))
-    issues = payload.get("issues", [])
-    required_keys = {
-        "id",
-        "title",
-        "match_type",
-        "severity",
-        "confidence",
-        "description",
-        "spec_evidence",
-        "code_evidence",
-        "verification",
-    }
-    if len(issues) < 4:
-        sys.stderr.write(f"expected at least 4 smoke-test issues, got {len(issues)}\n")
+    missing = [item for item in REQUIRED_PATHS if not (ROOT / item).exists()]
+    if missing:
+        sys.stderr.write("missing required files:\n")
+        for item in missing:
+            sys.stderr.write(f"  - {item}\n")
         return 1
-    for issue in issues:
-        missing = sorted(required_keys - set(issue))
-        if missing:
-            sys.stderr.write(f"issue {issue.get('id')} missing keys: {missing}\n")
-            return 1
-        if not issue["spec_evidence"] or not issue["code_evidence"]:
-            sys.stderr.write(f"issue {issue.get('id')} lacks evidence\n")
-            return 1
 
-    print(f"self-check passed: {len(issues)} issues, output={OUT}")
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(ROOT) if not existing else f"{ROOT}{os.pathsep}{existing}"
+
+    checks = [
+        [sys.executable, "-m", "specdiff.tool_api", "--help"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+    ]
+    for cmd in checks:
+        result = subprocess.run(cmd, cwd=str(ROOT), env=env, text=True, capture_output=True)
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return result.returncode
+
+    print("self-check passed: required files present, runtime imports, tests pass")
     return 0
 
 

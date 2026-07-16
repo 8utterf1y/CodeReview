@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "SpecDiff",
+          "informationUri": "https://opencode.ai/",
+          "rules": []
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "properties": {
+            "audit_id": "AUDIT-fde2ca7f2be6"
+          }
+        }
+      ],
+      "results": [
+        {
+          "ruleId": "mismatch",
+          "level": "warning",
+          "message": {
+            "text": "Found evidence of proxy Neighbor Advertisement implementation (17 proxy references), but search for 'unsolicited' returned 0 hits. The codebase appears to have proxy NA capability but may not have explicit unsolicited NA implementation as required by RFC 4861 Section 7.2.6."
+          },
+          "properties": {
+            "issue_id": "ISSUE-001",
+            "requirement_id": "DOC-0003",
+            "confidence": 0.5,
+            "evidence_ids": [
+              "E-00000140",
+              "E-00000141",
+              "E-00000142",
+              "E-00000143"
+            ]
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "freebsd/netinet6/nd6_nbr.c"
+                },
+                "region": {
+                  "startLine": 98
+                }
+              },
+              "message": {
+                "text": "static struct ifaddr *nd6_proxy_fill_sdl(struct ifnet *,"
+              }
+            }
+          ],
+          "relatedLocations": [
+            {
+              "id": 1,
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "freebsd/netinet6/nd6_nbr.c"
+                },
+                "region": {
+                  "startLine": 134
+                }
+              },
+              "message": {
+                "text": "struct sockaddr_dl proxydl;"
+              }
+            },
+            {
+              "id": 2,
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "freebsd/netinet6/nd6_nbr.c"
+                },
+                "region": {
+                  "startLine": 138
+                }
+              },
+              "message": {
+                "text": "int anycast, lladdrlen, proxy, rflag, tentative, tlladdr;"
+              }
+            },
+            {
+              "id": 3,
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "freebsd/netinet6/nd6_nbr.c"
+                },
+                "region": {
+                  "startLine": 255
+                }
+              },
+              "message": {
+                "text": "* (2) Unicast address for which I'm offering proxy service, or"
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "mismatch",
+          "level": "error",
+          "message": {
+            "text": "No evidence of MLD (Multicast Listener Discovery) implementation found. Searches for 'MLD', 'Listener', and 'RFC 2710' all returned 0 hits. The codebase does not appear to implement RFC 2710 MLD packet handling for delivery to the IPv6/ICMPv6 stack."
+          },
+          "properties": {
+            "issue_id": "ISSUE-002",
+            "requirement_id": "DOC-0006",
+            "confidence": 0.95,
+            "evidence_ids": []
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -12,6 +12,89 @@ TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".adoc", ".html", ".htm"}
 SKIP_SPEC_DIRS = {".specdiff", "q", "results", "result", "reports", "report", "outputs", "output"}
 
 
+<<<<<<< HEAD
+=======
+BUILTIN_RFC_REQUIREMENTS = [
+    Requirement(
+        id="RFC4861-ND-OPTIONS",
+        document="RFC 4861",
+        section="4.6.2 / 6.3.4",
+        quote=(
+            "RFC 4861 processes Neighbor Discovery options per received option, including "
+            "Prefix Information options in Router Advertisements. A receiver-side arbitrary "
+            "count cap can discard otherwise valid options."
+        ),
+        normalized="Process valid Neighbor Discovery options without an arbitrary small count limit.",
+        keywords=["neighbor", "discovery", "option", "prefix", "nd6", "ndopt"],
+        source="builtin-rfc-hint",
+    ),
+    Requirement(
+        id="RFC4861-PROXY-NA-DELAY",
+        document="RFC 4861",
+        section="7.2.8 / 10",
+        quote=(
+            "RFC 4861 proxy/anycast Neighbor Advertisement handling uses a random response "
+            "delay bounded by MAX_ANYCAST_DELAY_TIME to reduce response collisions."
+        ),
+        normalized="Proxy Neighbor Advertisements should be randomly delayed before transmission.",
+        keywords=["proxy", "neighbor", "advertisement", "delay", "random", "anycast"],
+        source="builtin-rfc-hint",
+    ),
+    Requirement(
+        id="RFC4861-PROXY-UNSOLICITED-NA",
+        document="RFC 4861",
+        section="7.2.8",
+        quote=(
+            "RFC 4861 proxy Neighbor Advertisement behavior includes proactively updating "
+            "neighbors when proxy state changes; absence of an unsolicited/all-nodes NA path "
+            "leaves neighbor caches stale."
+        ),
+        normalized="Proxy implementations should support unsolicited Neighbor Advertisements.",
+        keywords=["proxy", "unsolicited", "neighbor", "advertisement"],
+        source="builtin-rfc-hint",
+    ),
+    Requirement(
+        id="RFC8200-EXTENSION-HEADER-CHAIN",
+        document="RFC 8200",
+        section="4 / 4.5",
+        quote=(
+            "RFC 8200 encodes IPv6 extension headers as a Next Header chain. Fragment "
+            "header handling must account for preceding extension headers rather than "
+            "checking only the IPv6 base header's immediate Next Header value."
+        ),
+        normalized="IPv6 fragmentation logic must walk the extension-header chain to find a Fragment header.",
+        keywords=["ipv6", "extension", "fragment", "next header", "chain"],
+        source="builtin-rfc-hint",
+    ),
+    Requirement(
+        id="RFC8415-DHCPV6",
+        document="RFC 8415",
+        section="all",
+        quote=(
+            "RFC 8415 defines DHCPv6 client/server message processing for IPv6 address "
+            "assignment and configuration parameters; a compliant implementation needs "
+            "discoverable DHCPv6 protocol entry points."
+        ),
+        normalized="An IPv6 stack claiming DHCPv6 support needs implementation entry points for DHCPv6.",
+        keywords=["dhcpv6", "dhcp6"],
+        source="builtin-rfc-hint",
+    ),
+    Requirement(
+        id="RFC2710-MLD",
+        document="RFC 2710",
+        section="all",
+        quote=(
+            "RFC 2710 defines Multicast Listener Discovery as ICMPv6 multicast listener "
+            "messages. The receive path must deliver those packets to IPv6/ICMPv6 MLD handling."
+        ),
+        normalized="MLD ICMPv6 multicast messages must be received and dispatched to the IPv6 stack.",
+        keywords=["mld", "multicast", "icmpv6", "listener"],
+        source="builtin-rfc-hint",
+    ),
+]
+
+
+>>>>>>> bc85301 (workbatchwin)
 def load_spec_texts(path: Path) -> List[tuple[str, str]]:
     path = path.expanduser().resolve()
     if not path.exists():
@@ -47,7 +130,10 @@ def load_spec_texts(path: Path) -> List[tuple[str, str]]:
 
 
 def extract_requirements(path: Path, *, include_builtin_hints: bool = False) -> List[Requirement]:
+<<<<<<< HEAD
     del include_builtin_hints
+=======
+>>>>>>> bc85301 (workbatchwin)
     texts = load_spec_texts(path)
     requirements: List[Requirement] = []
     counter = 1
@@ -73,6 +159,19 @@ def extract_requirements(path: Path, *, include_builtin_hints: bool = False) -> 
                 )
                 counter += 1
 
+<<<<<<< HEAD
+=======
+    if include_builtin_hints:
+        corpus = "\n".join(text for _, text in texts).lower()
+        for req in BUILTIN_RFC_REQUIREMENTS:
+            rfc_name = req.document.lower().replace(" ", "")
+            spaced = req.document.lower()
+            if rfc_name in corpus.replace(" ", "") or spaced in corpus or any(k in corpus for k in req.keywords):
+                requirements.append(req)
+
+    if not requirements and include_builtin_hints:
+        requirements.extend(BUILTIN_RFC_REQUIREMENTS)
+>>>>>>> bc85301 (workbatchwin)
     return requirements
 
 
@@ -155,6 +254,12 @@ def find_requirement(requirements: List[Requirement], req_id: str) -> Requiremen
     for req in requirements:
         if req.id == req_id:
             return req
+<<<<<<< HEAD
+=======
+    for req in BUILTIN_RFC_REQUIREMENTS:
+        if req.id == req_id:
+            return req
+>>>>>>> bc85301 (workbatchwin)
     raise KeyError(req_id)
 
 

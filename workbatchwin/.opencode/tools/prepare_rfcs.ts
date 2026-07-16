@@ -20,9 +20,7 @@ export default tool({
     const cache = join(repo, ".specdiff", "rfc-cache");
     const command = ["-m", "specdiff.tool_api", "prepare-rfcs", "--inventory", inventory, "--out", out, "--cache-dir", cache];
     if (args.maxPerRfc !== undefined) command.push("--max-per-rfc", String(args.maxPerRfc));
-    if (args.offline) command.push("--offline");
-    const homeDir = process.env.USERPROFILE;
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? join(homeDir, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
+    if (args.offline) command.push("--offline");    const runtime = [join(repo, ".opencode", "specdiff-runtime"), process.env.PYTHONPATH].filter(Boolean).join(";");
     try {
       const { stdout } = await execFileAsync(pythonBin(), command, { cwd: repo, env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
       return stdout;

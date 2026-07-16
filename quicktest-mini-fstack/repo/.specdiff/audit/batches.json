@@ -1,0 +1,268 @@
+{
+  "schema_version": "1.0",
+  "batches": [
+    {
+      "batch_id": "BATCH-0001",
+      "topic": "BATCH-USERS8UTTERF1YDESKTOPAGE-unknown-general-0001",
+      "group_key": "USERS8UTTERF1YDESKTOPAGE|unknown|general",
+      "requirement_ids": [
+        "DOC-0001",
+        "DOC-0002",
+        "DOC-0003",
+        "DOC-0006"
+      ],
+      "requirements": [
+        {
+          "id": "DOC-0001",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-ND-OPTIONS",
+          "quote": "- Requirement: RFC 4861 Section 6.3.4 and Section 4.6.2 say valid Neighbor Discovery options in Router Advertisements MUST be processed without discarding otherwise valid options only because more than a small arbitrary number of options were present.",
+          "normalized": "- Requirement: RFC 4861 Section 6.3.4 and Section 4.6.2 say valid Neighbor Discovery options in Router Advertisements MUST be processed without discarding otherwise valid options only because more than a small arbitrary number of options were present.",
+          "keywords": [
+            "advertisements",
+            "arbitrary",
+            "because",
+            "discarding",
+            "discovery",
+            "more",
+            "neighbor",
+            "number",
+            "only",
+            "options",
+            "otherwise",
+            "present",
+            "processed",
+            "requirement",
+            "rfc",
+            "router",
+            "say",
+            "section",
+            "small",
+            "than"
+          ],
+          "source": "document"
+        },
+        {
+          "id": "DOC-0002",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-PROXY-NA-RANDOM-DELAY",
+          "quote": "- Requirement: RFC 4861 Section 7.2.8 says proxy or anycast Neighbor Advertisement behavior SHOULD use a random response delay bounded by MAX_ANYCAST_DELAY_TIME before transmission when responding on behalf of another node.",
+          "normalized": "- Requirement: RFC 4861 Section 7.2.8 says proxy or anycast Neighbor Advertisement behavior SHOULD use a random response delay bounded by MAX_ANYCAST_DELAY_TIME before transmission when responding on behalf of another node.",
+          "keywords": [
+            "advertisement",
+            "another",
+            "anycast",
+            "before",
+            "behalf",
+            "behavior",
+            "bounded",
+            "delay",
+            "max_anycast_delay_time",
+            "neighbor",
+            "node",
+            "proxy",
+            "random",
+            "requirement",
+            "responding",
+            "response",
+            "rfc",
+            "says",
+            "section",
+            "transmission"
+          ],
+          "source": "document"
+        },
+        {
+          "id": "DOC-0003",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-PROXY-UNSOLICITED-NA",
+          "quote": "- Requirement: RFC 4861 Section 7.2.6 says a proxy Neighbor Discovery implementation SHOULD support the MAY behavior of sending unsolicited Neighbor Advertisements when proxy state is configured or changes, so that neighbor caches do not remain stale.",
+          "normalized": "- Requirement: RFC 4861 Section 7.2.6 says a proxy Neighbor Discovery implementation SHOULD support the MAY behavior of sending unsolicited Neighbor Advertisements when proxy state is configured or changes, so that neighbor caches do not remain stale.",
+          "keywords": [
+            "advertisements",
+            "behavior",
+            "caches",
+            "changes",
+            "configured",
+            "discovery",
+            "implementation",
+            "may",
+            "neighbor",
+            "proxy",
+            "remain",
+            "requirement",
+            "rfc",
+            "says",
+            "section",
+            "sending",
+            "stale",
+            "state",
+            "support",
+            "unsolicited"
+          ],
+          "source": "document"
+        },
+        {
+          "id": "DOC-0006",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-MLD-DISPATCH",
+          "quote": "- Requirement: RFC 2710 says IPv6 MLD packets MUST be delivered to the IPv6 or ICMPv6 stack instead of being diverted to an unrelated host or KNI path before MLD handling can process them.",
+          "normalized": "- Requirement: RFC 2710 says IPv6 MLD packets MUST be delivered to the IPv6 or ICMPv6 stack instead of being diverted to an unrelated host or KNI path before MLD handling can process them.",
+          "keywords": [
+            "before",
+            "being",
+            "can",
+            "delivered",
+            "diverted",
+            "handling",
+            "host",
+            "icmpv6",
+            "instead",
+            "ipv6",
+            "kni",
+            "mld",
+            "packets",
+            "path",
+            "process",
+            "requirement",
+            "rfc",
+            "says",
+            "stack",
+            "them"
+          ],
+          "source": "document"
+        }
+      ],
+      "code_hints": {
+        "components": [],
+        "symbols": [],
+        "files": [],
+        "symbol_families": [],
+        "source": "sqlite_codefacts_affinity"
+      },
+      "limits": {
+        "max_queries": 70,
+        "max_text_queries": 30
+      }
+    },
+    {
+      "batch_id": "BATCH-0002",
+      "topic": "BATCH-USERS8UTTERF1YDESKTOPAGE-dpdk/lib-general-0002",
+      "group_key": "USERS8UTTERF1YDESKTOPAGE|dpdk/lib|general",
+      "requirement_ids": [
+        "DOC-0004"
+      ],
+      "requirements": [
+        {
+          "id": "DOC-0004",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-IPV6-FRAGMENT-HEADER-CHAIN",
+          "quote": "- Requirement: RFC 8200 Section 4 and Section 4.5 say IPv6 fragment handling MUST locate a Fragment Header after walking any preceding extension headers, rather than checking only the IPv6 base header immediate Next Header value.",
+          "normalized": "- Requirement: RFC 8200 Section 4 and Section 4.5 say IPv6 fragment handling MUST locate a Fragment Header after walking any preceding extension headers, rather than checking only the IPv6 base header immediate Next Header value.",
+          "keywords": [
+            "after",
+            "any",
+            "base",
+            "checking",
+            "extension",
+            "fragment",
+            "handling",
+            "header",
+            "headers",
+            "immediate",
+            "ipv6",
+            "locate",
+            "next",
+            "only",
+            "preceding",
+            "rather",
+            "requirement",
+            "rfc",
+            "say",
+            "section"
+          ],
+          "source": "document"
+        }
+      ],
+      "code_hints": {
+        "components": [
+          "dpdk/lib"
+        ],
+        "symbols": [
+          "rte_ipv6_fragment_packet",
+          "rte_ipv6_frag_get_ipv6_fragment_header",
+          "rte_ipv4_fragment_packet",
+          "rte_ipv4_fragment_copy_nonseg_packet",
+          "rte_ipv4_frag_pkt_is_fragmented"
+        ],
+        "files": [
+          "dpdk/lib/ip_frag/rte_ip_frag.h"
+        ],
+        "symbol_families": [],
+        "source": "sqlite_codefacts_affinity"
+      },
+      "limits": {
+        "max_queries": 70,
+        "max_text_queries": 30
+      }
+    },
+    {
+      "batch_id": "BATCH-0003",
+      "topic": "BATCH-USERS8UTTERF1YDESKTOPAGE-freebsd/netinet6-nd6-0003",
+      "group_key": "USERS8UTTERF1YDESKTOPAGE|freebsd/netinet6|nd6",
+      "requirement_ids": [
+        "DOC-0005"
+      ],
+      "requirements": [
+        {
+          "id": "DOC-0005",
+          "document": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/docs/benchmark.md",
+          "section": "REQ-DHCPV6",
+          "quote": "- Requirement: RFC 8415 says an IPv6 stack expected to provide DHCPv6 support MUST contain discoverable DHCPv6 client, server, relay, or message-processing entry points.",
+          "normalized": "- Requirement: RFC 8415 says an IPv6 stack expected to provide DHCPv6 support MUST contain discoverable DHCPv6 client, server, relay, or message-processing entry points.",
+          "keywords": [
+            "client",
+            "contain",
+            "dhcpv6",
+            "discoverable",
+            "entry",
+            "expected",
+            "ipv6",
+            "message-processing",
+            "points",
+            "provide",
+            "relay",
+            "requirement",
+            "rfc",
+            "says",
+            "server",
+            "stack",
+            "support"
+          ],
+          "source": "document"
+        }
+      ],
+      "code_hints": {
+        "components": [
+          "freebsd/netinet6"
+        ],
+        "symbols": [
+          "nd6_try_set_entry_addr_locked",
+          "nd6_try_set_entry_addr",
+          "nd6_get_llentry"
+        ],
+        "files": [
+          "freebsd/netinet6/nd6.c"
+        ],
+        "symbol_families": [
+          "nd6"
+        ],
+        "source": "sqlite_codefacts_affinity"
+      },
+      "limits": {
+        "max_queries": 70,
+        "max_text_queries": 30
+      }
+    }
+  ]
+}

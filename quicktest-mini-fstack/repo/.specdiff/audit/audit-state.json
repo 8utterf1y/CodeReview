@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "audit_id": "AUDIT-fde2ca7f2be6",
+  "repo": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/repo",
+  "requirements_source": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/repo/.specdiff/audit/parsed-requirements.json",
+  "requested_output": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/repo/.specdiff/issues.json",
+  "requirements_sha256": "8f1caae4d264bc332e15181ffd99db5158bc8f0a42980b40b77afc5f44158f77",
+  "code_revision": "5beaa6dab3684f7848fc55287c52a447958723a8",
+  "stage": "assembled",
+  "assembly_allowed": true,
+  "requirements": {
+    "DOC-0001": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    },
+    "DOC-0002": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    },
+    "DOC-0003": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    },
+    "DOC-0004": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    },
+    "DOC-0005": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    },
+    "DOC-0006": {
+      "investigation": "submitted",
+      "verification": "not_required"
+    }
+  },
+  "batch_cursor": 3,
+  "active_batch_id": null,
+  "batch_mode": true,
+  "counters": {
+    "query": 88,
+    "evidence": 1133,
+    "action": 0
+  },
+  "created_at": "2026-07-15T14:52:48.362227+00:00",
+  "updated_at": "2026-07-15T15:30:24.120647+00:00",
+  "assembled_output": "/Users/8utterf1y/Desktop/agent项目/skills/quicktest-mini-fstack/repo/.specdiff/issues.json"
+}

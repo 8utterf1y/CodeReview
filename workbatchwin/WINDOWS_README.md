@@ -1,43 +1,48 @@
-# SpecDiff Batch Windows Deployment
+# SpecDiff Windows 快速部署说明
 
-This folder is a Windows-oriented copy of the current batch-mode `work/`.
+本目录是 Windows/OpenCode 版提交包。提交到评测平台时，将本目录内容作为 `work/` 目录。
 
-## Prerequisites
+## 1. 前置条件
 
-- Windows 10/11
-- Python 3 available as `python`
-- OpenCode installed
-
-If Python is installed under another command, set:
-
-```powershell
-$env:PYTHON = "C:\Path\To\python.exe"
+```text
+Windows 10/11
+Python 3.9+，命令为 python
+OpenCode
 ```
 
-## Install Into A Repository
+请确认 `python` 已在 PATH 中可直接执行。
 
-From this `workbatchwin` folder:
-
-```powershell
-.\install_opencode_interactive.ps1 -Target C:\path\to\repo -Force
-```
-
-Then start OpenCode from the target repository:
+## 2. 启动 OpenCode
 
 ```powershell
-cd C:\path\to\repo
+cd C:\judge-assets\01_03_ai_implementation_design_difference_detection\work
 opencode
 ```
 
-Run:
+SpecDiff runtime、tools、agents、commands 和 skill 均位于提交目录：
 
 ```text
-/spec-audit C:\path\to\docs.md .specdiff\issues.json
+work\.opencode\
 ```
 
-## Notes
+## 3. 运行审计
 
-- This version uses Audit Batches: Pack remains the result/coverage unit, Batch is only the Agent dispatch unit.
-- OpenCode tools use `python` on Windows and `python3` elsewhere.
-- `PYTHONPATH` uses the platform path delimiter automatically.
-- The runtime is copied into `.opencode\specdiff-runtime`.
+OpenCode 内输入：
+
+```text
+/spec-audit C:\judge-assets\01_03_ai_implementation_design_difference_detection\code\f-stack C:\judge-assets\01_03_ai_implementation_design_difference_detection\Difference\benchmark.md C:\judge-assets\01_03_ai_implementation_design_difference_detection\code\f-stack\.specdiff\issues.json
+```
+
+## 4. 输出
+
+```text
+code\f-stack\.specdiff\issues.json
+code\f-stack\.specdiff\issues.sarif
+```
+
+## 5. 注意
+
+- Batch 是 Agent 调查单位，Pack 是最终结果单位。
+- `code_search` 在 Batch 模式下自动绑定 active batch，不需要手工填写 requirementId。
+- Windows tools 固定使用 `python`，并使用 `;` 作为 `PYTHONPATH` 分隔符。
+- 重新审计同一个仓库前，建议清理 `work\.specdiff\audit` 工作目录后再运行。

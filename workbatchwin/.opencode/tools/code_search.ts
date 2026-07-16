@@ -26,12 +26,12 @@ export default tool({
       const window = args.window ?? 20;
       command.push("--start", String(Math.max(1, args.line - window)), "--end", String(args.line + window));
     }
-    return run(command);
+    return run(command, context.directory);
   },
 });
 
-async function run(args: string[]) {
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, process.env.USERPROFILE ? join(process.env.USERPROFILE, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
+async function run(args: string[], projectRoot: string) {
+  const runtime = [join(projectRoot, ".opencode", "specdiff-runtime"), process.env.PYTHONPATH].filter(Boolean).join(";");
   const { stdout } = await execFileAsync("python", ["-m", "specdiff.tool_api", ...args], { env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
   return stdout;
 }
