@@ -15,7 +15,7 @@ export default tool({
       requirementId: tool.schema.string().min(1),
       status: tool.schema.enum(["covered", "partial", "violated", "unknown"]),
       summary: tool.schema.string().min(1),
-      specClauseIds: tool.schema.array(tool.schema.string()),
+      specClauseIds: tool.schema.array(tool.schema.string()).optional(),
       evidenceIds: tool.schema.array(tool.schema.string()),
       confidence: tool.schema.number().min(0).max(1),
       issue: tool.schema.object({
@@ -31,7 +31,7 @@ export default tool({
         requirement_id: item.requirementId,
         status: item.status,
         summary: item.summary,
-        spec_clause_ids: item.specClauseIds,
+        spec_clause_ids: item.specClauseIds ?? [],
         evidence_ids: item.evidenceIds,
         confidence: item.confidence,
         issue: item.issue,

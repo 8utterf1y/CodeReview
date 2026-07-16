@@ -23,7 +23,10 @@ BUILD_NAMES = {
     "BUILD.bazel": "bazel", "WORKSPACE": "bazel", "Cargo.toml": "cargo",
     "go.mod": "go", "package.json": "node", "pyproject.toml": "python",
 }
-SKIP_DIRS = {".git", ".specdiff", "node_modules", ".venv", "venv", "__pycache__", "dist"}
+SKIP_DIRS = {
+    ".git", ".specdiff", ".opencode", ".codex", ".agents",
+    "node_modules", ".venv", "venv", "__pycache__", "dist",
+}
 
 
 def build_repository_index(repo: Path, out_dir: Path) -> Dict[str, Any]:

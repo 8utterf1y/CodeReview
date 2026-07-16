@@ -65,7 +65,12 @@ def _validate_assembled_result(result_path: Path, payload: Dict[str, Any]) -> Di
         errors.append("assembled audit_id does not match controlled state")
     if state.get("stage") != "assembled" or not state.get("assembly_allowed"):
         errors.append("controlled audit state is not assembled/assembly_allowed")
-    if Path(str(state.get("assembled_output") or "")).resolve() != result_path.resolve():
+    accepted_outputs = {
+        Path(str(value)).resolve()
+        for value in (state.get("assembled_output"), state.get("assembled_full_report"))
+        if value
+    }
+    if result_path.resolve() not in accepted_outputs:
         errors.append("controlled audit state points to a different assembled output")
 
     query_ids = _jsonl_ids(workspace / "queries.jsonl", "query_id")

@@ -32,8 +32,16 @@ When `next_action` is `investigate_batch`:
 - Investigate only the supplied `batch`.
 - First perform shared implementation discovery for the whole batch.
 - Start from `batch.code_hints.components`, `batch.code_hints.symbols`, `batch.code_hints.files`, and `batch.code_hints.symbol_families`.
+- If `batch.discovery_plan.source_windows` is present, read those source windows first with `code_search(operation="source", path=..., startLine=..., endLine=...)`.
+- Use `batch.discovery_plan.symbol_queries`, `reference_queries`, and `component_queries` before any broad text search.
 - `code_search` is automatically scoped to the active batch; omit `requirementId` during shared discovery.
 - Prefer navigation order: component or repo_map -> symbol -> references/callers/callees -> source.
+- Treat text, component, symbol, references, callers, and callees results as candidate discovery only.
+- Before submitting `covered` or `partial`, read exact source spans with `code_search(operation="source")` and cite those source evidence IDs.
+- If submitting `violated` with code evidence, cite exact source spans, not text/symbol hits.
+- For pure missing-module violations, document the negative searches in the summary and submit no code evidence rather than citing weak text misses.
+- Check nearby source comments and guard conditions for negative evidence such as "not implemented", TODO, hard-coded max/limit/cap, "only", "immediate", "direct header", missing entry points, bypass/filter/divert paths.
+- Do not mark a Pack `covered` just because related code exists; confirm the specific required behavior in source and run at least one targeted counterexample or negative search.
 - Do not restart broad repository search for each Pack.
 - Use Pack-specific search only when shared evidence is insufficient.
 - Respect `batch.limits.max_queries` and `batch.limits.max_text_queries`; broad text search is scarce.

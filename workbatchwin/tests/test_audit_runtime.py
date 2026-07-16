@@ -569,6 +569,11 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertIn("src/net", batch["code_hints"]["components"])
         action = next_action(workspace)
         self.assertNotIn("normalized", action["batch"]["requirements"][0])
+        plan = action["batch"]["discovery_plan"]
+        self.assertEqual(plan["preferred_order"][0], "source_windows")
+        self.assertTrue(plan["source_windows"])
+        self.assertEqual(plan["source_windows"][0]["operation"], "source")
+        self.assertEqual(plan["source_windows"][0]["path"], "src/net/mld.c")
 
     def test_batch_partial_submit_missing_pack_becomes_unknown_and_finishes(self):
         root = Path(self.temp.name)
@@ -581,7 +586,7 @@ class AuditRuntimeTests(unittest.TestCase):
         out = root / "batch-missing.json"
         init_audit(self.repo, reqs, workspace, out)
         action = next_action(workspace)
-        query = code_query(workspace, "PACK-A", "investigator", "concept", query="schedule_retry")
+        query = code_query(workspace, action["batch_id"], "investigator", "source", path="src/retry.c", start=1, end=2)
         submit_batch_results(workspace, self._payload("batch-results.json", {
             "batch_id": action["batch_id"],
             "results": [{
@@ -606,7 +611,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "batch-evidence"
         init_audit(self.repo, reqs, workspace)
         action = next_action(workspace)
-        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        query = code_query(workspace, action["batch_id"], "investigator", "source", path="src/retry.c", start=1, end=2)
         evidence_ids = query["evidence_ids"]
         result = submit_batch_results(workspace, self._payload("batch-shared-evidence.json", {
             "batch_id": action["batch_id"],
@@ -617,6 +622,26 @@ class AuditRuntimeTests(unittest.TestCase):
         }))
         self.assertEqual(len(result["accepted_results"]), 2)
         self.assertEqual(result["rejected_results"], [])
+
+    def test_batch_final_status_rejects_text_only_evidence(self):
+        root = Path(self.temp.name)
+        reqs = root / "batch-text-only-reqs.json"
+        reqs.write_text(json.dumps({"requirements": [
+            {"id": "PACK-A", "document": "spec", "section": "1", "quote": "The service MUST retry.", "normalized": "Retry.", "keywords": ["retry"]},
+        ]}), encoding="utf-8")
+        workspace = root / "batch-text-only"
+        init_audit(self.repo, reqs, workspace)
+        action = next_action(workspace)
+        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        result = submit_batch_results(workspace, self._payload("batch-text-only-results.json", {
+            "batch_id": action["batch_id"],
+            "results": [
+                {"requirement_id": "PACK-A", "status": "covered", "summary": "Text hit only.", "spec_clause_ids": [], "evidence_ids": query["evidence_ids"], "confidence": 0.8},
+            ],
+        }))
+        self.assertEqual(result["accepted_results"], [])
+        self.assertEqual(result["rejected_results"][0]["requirement_id"], "PACK-A")
+        self.assertIn("requires exact source evidence", result["rejected_results"][0]["reason"])
 
     def test_active_batch_code_search_needs_no_requirement_id(self):
         root = Path(self.temp.name)
@@ -644,7 +669,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "batch-wrong-id"
         init_audit(self.repo, reqs, workspace)
         action = next_action(workspace)
-        query = code_query(workspace, "MLD-002", "investigator", "concept", query="schedule_retry")
+        query = code_query(workspace, "MLD-002", "investigator", "source", path="src/retry.c", start=1, end=2)
         self.assertEqual(query["requirement_id"], action["batch_id"])
         self.assertEqual(query["parameters"]["requested_requirement_id"], "MLD-002")
         result = submit_batch_results(workspace, self._payload("batch-wrong-id-results.json", {
@@ -690,7 +715,7 @@ class AuditRuntimeTests(unittest.TestCase):
         out = root / "batch-invalid.json"
         init_audit(self.repo, reqs, workspace, out)
         action = next_action(workspace)
-        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        query = code_query(workspace, action["batch_id"], "investigator", "source", path="src/retry.c", start=1, end=2)
         result = submit_batch_results(workspace, self._payload("batch-invalid-results.json", {
             "batch_id": action["batch_id"],
             "results": [
@@ -716,7 +741,7 @@ class AuditRuntimeTests(unittest.TestCase):
         out = root / "batch-partial.json"
         init_audit(self.repo, reqs, workspace, out)
         action = next_action(workspace)
-        query = code_query(workspace, action["batch_id"], "investigator", "concept", query="schedule_retry")
+        query = code_query(workspace, action["batch_id"], "investigator", "source", path="src/retry.c", start=1, end=2)
         submit_batch_results(workspace, self._payload("batch-partial-results.json", {
             "batch_id": action["batch_id"],
             "results": [

@@ -30,8 +30,11 @@ HARD_MAX_BATCHES = 30
 MIN_TOPIC_MERGE_SCORE = 6.0
 MAX_BATCH_PACKET_PACKS = 12
 MAX_BATCH_PACKET_CLAUSES = 160
-MAX_BATCH_QUERIES = 70
-MAX_BATCH_TEXT_QUERIES = 30
+MAX_BATCH_QUERIES = 120
+MAX_BATCH_TEXT_QUERIES = 60
+MAX_DISCOVERY_SOURCE_WINDOWS = 8
+MAX_DISCOVERY_SYMBOLS = 12
+MAX_DISCOVERY_FILES = 8
 LOW_VALUE_SYMBOL_FAMILIES = {
     "get", "set", "test", "member", "default", "include", "lib", "app", "src", "cmd",
     "cache", "freebsd", "contrib", "ngx", "redis", "rte", "uni", "server", "client",
@@ -1332,6 +1335,7 @@ def _pack_code_affinity(
                     family = _symbol_family(part)
                     if family:
                         family_scores[family] += 1
+        _score_file_content_affinity(workspace, connection, terms, component_scores, file_scores, family_scores)
         components = _rank_components(component_scores, component_limit)
         families = _rank_symbol_families(family_scores, 8)
         return {
@@ -1343,6 +1347,36 @@ def _pack_code_affinity(
         }
     finally:
         connection.close()
+
+
+def _score_file_content_affinity(
+    workspace: Path, connection: sqlite3.Connection, terms: List[str],
+    component_scores: Counter[str], file_scores: Counter[str], family_scores: Counter[str],
+) -> None:
+    repo = Path(_state(workspace)["repo"])
+    useful_terms = [term for term in terms if len(term) >= 3][:24]
+    if not useful_terms:
+        return
+    rows = connection.execute(
+        "SELECT path, component, source_role, size FROM files WHERE language IS NOT NULL ORDER BY source_role='production' DESC, path LIMIT 500"
+    ).fetchall()
+    for row in rows:
+        if int(row["size"]) > 2_000_000:
+            continue
+        try:
+            text = (repo / row["path"]).read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+        score = sum(1 for term in useful_terms if term in text)
+        if not score:
+            continue
+        weight = score * (3 if row["source_role"] == "production" else 1)
+        file_scores[row["path"]] += weight
+        component_scores[row["component"]] += weight
+        for part in Path(row["path"]).parts:
+            family = _symbol_family(part)
+            if family:
+                family_scores[family] += score
 
 
 def _symbol_family(name: str) -> str:
@@ -1384,16 +1418,62 @@ def _rank_symbol_families(scores: Counter[str], limit: int) -> List[str]:
 
 
 def _hint_terms(requirement: Dict[str, Any]) -> List[str]:
-    text = " ".join(
+    raw_text = " ".join(
         str(requirement.get(field) or "")
         for field in ("document", "section", "quote", "normalized", "capability")
     )
-    terms = list(requirement.get("keywords") or [])
-    for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower()):
-        if term not in terms:
-            terms.append(term)
+    raw_keywords = [str(term) for term in (requirement.get("keywords") or [])]
+    text = " ".join([raw_text, *raw_keywords])
+    terms: List[str] = []
+    for acronym in _phrase_acronyms(text):
+        _append_hint_term(terms, acronym)
+        if "ipv6" in text.lower() or "icmpv6" in text.lower():
+            _append_hint_term(terms, f"{acronym}6")
+    for term in raw_keywords:
+        _append_hint_term(terms, term)
+        for part in re.split(r"[^A-Za-z0-9]+|_", term):
+            _append_hint_term(terms, part)
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}", text):
+        _append_hint_term(terms, term)
+        for part in re.split(r"[^A-Za-z0-9]+|_", term):
+            _append_hint_term(terms, part)
     stop = {"rfc", "must", "should", "shall", "not", "for", "the", "and", "all", "section"}
-    return [term for term in terms if term not in stop][:20]
+    return [term for term in terms if term not in stop][:40]
+
+
+def _append_hint_term(terms: List[str], term: str) -> None:
+    value = re.sub(r"[^A-Za-z0-9_]+", "", str(term).lower())
+    if len(value) >= 2 and value not in terms:
+        terms.append(value)
+    if "ipv6" in value and "ip6" not in terms:
+        terms.append("ip6")
+    if value.endswith("v6"):
+        v6_alias = value[:-2] + "6"
+        if len(v6_alias) >= 2 and v6_alias not in terms:
+            terms.append(v6_alias)
+    aliases = {
+        "fragment": "frag",
+        "fragments": "frag",
+        "fragmentation": "frag",
+        "extension": "ext",
+        "advertisement": "adv",
+        "advertisements": "adv",
+    }
+    alias = aliases.get(value)
+    if alias and alias not in terms:
+        terms.append(alias)
+    if value.startswith("rfc") and value[3:].isdigit() and value[3:] not in terms:
+        terms.append(value[3:])
+
+
+def _phrase_acronyms(text: str) -> List[str]:
+    acronyms: List[str] = []
+    for match in re.finditer(r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){1,4})\b", text):
+        words = match.group(1).split()
+        initials = "".join(word[0].lower() for word in words if word and word[0].isalpha())
+        if 2 <= len(initials) <= 5 and initials not in acronyms:
+            acronyms.append(initials)
+    return acronyms
 
 
 def _pack_coverage(workspace: Path, records: List[Dict[str, Any]], verifications: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -1437,7 +1517,7 @@ def _next_batch_action_locked(workspace: Path, state: Dict[str, Any]) -> Dict[st
         batch = batches[cursor]
         state["batch_cursor"] = cursor + 1
         state["active_batch_id"] = batch["batch_id"]
-        return {"next_action": "investigate_batch", "batch": _batch_packet(batch), "batch_id": batch["batch_id"]}
+        return {"next_action": "investigate_batch", "batch": _batch_packet(workspace, batch), "batch_id": batch["batch_id"]}
     _refresh_stage(state)
     if state["assembly_allowed"]:
         return {"next_action": "finish" if state["stage"] != "assembled" else "done"}
@@ -1630,10 +1710,106 @@ def _make_batch(index: int, topic: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _batch_packet(batch: Dict[str, Any]) -> Dict[str, Any]:
+def _batch_packet(workspace: Path, batch: Dict[str, Any]) -> Dict[str, Any]:
     packet = dict(batch)
     packet["requirements"] = [_compact_requirement(req) for req in batch["requirements"]]
+    packet["discovery_plan"] = _batch_discovery_plan(workspace, batch)
+    packet["investigation_rules"] = {
+        "text_search_is_candidate_discovery_only": True,
+        "final_covered_or_partial_requires_source_evidence": True,
+        "source_evidence_precision": "exact_source_span",
+        "covered_requires_counterexample_search": True,
+        "use_discovery_plan_first": True,
+        "max_initial_text_searches_before_source": 2,
+        "negative_patterns": [
+            "not implemented", "TODO", "XXX",
+            "max", "limit", "cap", "hard-coded",
+            "only", "immediate", "direct header",
+            "absent", "missing", "no entry point",
+            "enqueue", "filter", "bypass", "divert",
+        ],
+    }
     return packet
+
+
+def _batch_discovery_plan(workspace: Path, batch: Dict[str, Any]) -> Dict[str, Any]:
+    hints = batch.get("code_hints") or {}
+    symbols = list(dict.fromkeys(hints.get("symbols") or []))[:MAX_DISCOVERY_SYMBOLS]
+    files = list(dict.fromkeys(hints.get("files") or []))[:MAX_DISCOVERY_FILES]
+    components = list(dict.fromkeys(hints.get("components") or []))[:5]
+    plan: Dict[str, Any] = {
+        "source": "sqlite_codefacts",
+        "preferred_order": ["source_windows", "symbol_queries", "reference_queries", "component_queries", "text_fallback"],
+        "source_windows": [],
+        "symbol_queries": [{"operation": "symbol", "term": symbol} for symbol in symbols],
+        "reference_queries": [{"operation": "references", "term": symbol} for symbol in symbols[:8]],
+        "component_queries": [{"operation": "component", "term": component} for component in components],
+        "text_fallback_terms": _batch_fallback_terms(batch)[:8],
+    }
+    db_path = workspace / "code-index" / "codefacts.sqlite"
+    if not db_path.exists():
+        plan["source"] = "unavailable"
+        return plan
+    connection = sqlite3.connect(str(db_path))
+    connection.row_factory = sqlite3.Row
+    try:
+        windows: List[Dict[str, Any]] = []
+        if symbols:
+            placeholders = ",".join("?" for _ in symbols)
+            rows = connection.execute(
+                "SELECT s.name, s.kind, s.start_line, s.end_line, f.path, f.line_count, f.source_role, f.component "
+                "FROM symbols s JOIN files f USING(file_id) "
+                f"WHERE s.name IN ({placeholders}) "
+                "ORDER BY f.source_role='production' DESC, s.start_line LIMIT ?",
+                (*symbols, MAX_DISCOVERY_SOURCE_WINDOWS * 2),
+            ).fetchall()
+            for row in rows:
+                windows.append(_discovery_source_window(
+                    row["path"], row["line_count"], int(row["start_line"]), int(row["end_line"]),
+                    reason=f"symbol:{row['name']}",
+                ))
+        if len(windows) < MAX_DISCOVERY_SOURCE_WINDOWS and files:
+            placeholders = ",".join("?" for _ in files)
+            rows = connection.execute(
+                "SELECT path, line_count, source_role, component FROM files "
+                f"WHERE path IN ({placeholders}) "
+                "ORDER BY source_role='production' DESC, path LIMIT ?",
+                (*files, MAX_DISCOVERY_FILES),
+            ).fetchall()
+            for row in rows:
+                windows.append(_discovery_source_window(row["path"], row["line_count"], 1, min(80, int(row["line_count"])), reason="top_file"))
+        plan["source_windows"] = _unique_source_windows(windows)[:MAX_DISCOVERY_SOURCE_WINDOWS]
+    finally:
+        connection.close()
+    return plan
+
+
+def _discovery_source_window(path: str, line_count: int, start_line: int, end_line: int, *, reason: str) -> Dict[str, Any]:
+    total_lines = max(1, int(line_count))
+    start = max(1, start_line - 8)
+    end = min(total_lines, max(end_line + 20, start + 40))
+    return {"operation": "source", "path": path, "start_line": start, "end_line": end, "reason": reason}
+
+
+def _unique_source_windows(windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    result = []
+    for window in windows:
+        key = (window["path"], window["start_line"], window["end_line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(window)
+    return result
+
+
+def _batch_fallback_terms(batch: Dict[str, Any]) -> List[str]:
+    terms: List[str] = []
+    for req in batch.get("requirements") or []:
+        for term in _hint_terms(req):
+            if term not in terms:
+                terms.append(term)
+    return terms
 
 
 def _compact_requirement(req: Dict[str, Any]) -> Dict[str, Any]:
@@ -1710,6 +1886,10 @@ def _validate_one_batch_result(
         item = evidence.get(evidence_id)
         if not item or not _evidence_allowed_for_batch_result(item, batch["batch_id"], req_id):
             raise ValueError(f"{req_id}: invalid evidence_id {evidence_id}")
+    if status in {"covered", "partial"} and not _has_source_span_evidence(evidence, evidence_ids):
+        raise ValueError(f"{req_id}: {status} result requires exact source evidence; text/symbol hits are discovery only")
+    if status == "violated" and evidence_ids and not _has_source_span_evidence(evidence, evidence_ids):
+        raise ValueError(f"{req_id}: violated result with code evidence requires exact source evidence")
     spec_clause_ids = row.get("spec_clause_ids") if "spec_clause_ids" in row else row.get("specClauseIds")
     spec_clause_ids = spec_clause_ids or []
     allowed_clauses = set(requirements[req_id].get("clause_ids") or [req_id])
@@ -1730,6 +1910,14 @@ def _validate_one_batch_result(
 
 def _evidence_allowed_for_batch_result(evidence: Dict[str, Any], batch_id: str, req_id: str) -> bool:
     return evidence.get("batch_id") == batch_id or evidence.get("requirement_id") == req_id
+
+
+def _has_source_span_evidence(evidence: Dict[str, Dict[str, Any]], evidence_ids: List[str]) -> bool:
+    for evidence_id in evidence_ids:
+        item = evidence.get(evidence_id) or {}
+        if item.get("backend") == "source_read" and item.get("precision") == "exact_source_span":
+            return True
+    return False
 
 
 def _validate_batch_issue(issue: Any) -> None:
