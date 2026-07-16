@@ -26,6 +26,7 @@ from specdiff.audit_runtime import (
     submit_investigation,
     submit_verification,
     verification_conclusion_context,
+    MAX_BATCH_TEXT_QUERIES,
 )
 from specdiff.coverage_gate import validate_result
 from specdiff.spec_loader import extract_audit_requirements, load_spec_texts
@@ -63,6 +64,13 @@ class AuditRuntimeTests(unittest.TestCase):
         path = Path(self.temp.name) / name
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def _disable_batch_mode(self, workspace=None):
+        workspace = workspace or self.workspace
+        state = json.loads((workspace / "audit-state.json").read_text())
+        state["batch_mode"] = False
+        state["active_batch_id"] = None
+        (workspace / "audit-state.json").write_text(json.dumps(state), encoding="utf-8")
 
     def _frame_default(self, workspace=None, req_id="REQ-1"):
         workspace = workspace or self.workspace
@@ -215,6 +223,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "simple-satisfied"
         out = root / "simple-satisfied.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         action = next_action(workspace)
         self.assertEqual(action["next_action"], "frame_obligations")
         self.assertIn("code_hints", action)
@@ -241,13 +250,14 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         result = finish_audit(workspace)
         self.assertTrue(result["assembled"])
-        self.assertEqual(json.loads(out.read_text())["coverage_summary"]["status_counts"], {"covered": 1})
+        self.assertEqual(json.loads(out.with_suffix(".full.json").read_text())["coverage_summary"]["status_counts"], {"covered": 1})
 
     def test_next_action_finish_then_audit_finish_succeeds(self):
         root = Path(self.temp.name)
         workspace = root / "finish-invariant"
         out = root / "finish-invariant.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         obligation_id = self._frame_default(workspace)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         submit_conclusion(workspace, self._payload("finish-submit.json", {
@@ -264,6 +274,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "simple-mismatch"
         out = root / "simple-mismatch.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         frame_action = next_action(workspace)
         framed = frame_obligations(workspace, self._payload("simple-mismatch-frame.json", {
             "requirement_id": "REQ-1",
@@ -302,6 +313,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(len(json.loads(out.read_text())["issues"]), 1)
 
     def test_dispatch_result_failed_when_state_unchanged(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         result = dispatch_result(self.workspace, self._payload("dispatch-unchanged.json", {
             "requirement_id": "REQ-1", "action": "frame_obligations", "action_id": action["action_id"],
@@ -320,6 +332,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["recovery_action"], "call_audit_next")
 
     def test_committed_action_repeated_dispatch_result_is_idempotent(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         frame_obligations(self.workspace, self._payload("stale-complete-frame.json", {
             "requirement_id": "REQ-1",
@@ -336,6 +349,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(second["reason"], "already_committed")
 
     def test_action_lifecycle_commits_after_state_transition(self):
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         self.assertEqual(action["action"]["status"], "dispatched")
         frame_obligations(self.workspace, self._payload("lifecycle-frame.json", {
@@ -352,6 +366,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(actions[0]["expected_after"], "framed")
 
     def test_conclusion_submit_then_dispatch_result_completed(self):
+        self._disable_batch_mode()
         frame_action = next_action(self.workspace)
         obligation_id = self._frame_default()
         dispatch_result(self.workspace, self._payload("conclusion-frame-dispatch.json", {
@@ -372,6 +387,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["current_state"], "submitted")
 
     def test_audit_next_does_not_create_new_action_when_outstanding_exists(self):
+        self._disable_batch_mode()
         first = next_action(self.workspace)
         second = next_action(self.workspace)
         actions = json.loads((self.workspace / "actions.json").read_text())["actions"]
@@ -381,6 +397,7 @@ class AuditRuntimeTests(unittest.TestCase):
 
     def test_first_dispatch_failure_retries_same_action(self):
         self._frame_default()
+        self._disable_batch_mode()
         action = next_action(self.workspace)
         result = dispatch_result(self.workspace, self._payload("dispatch-retry.json", {
             "requirement_id": "REQ-1", "action": "investigate", "action_id": action["action_id"],
@@ -425,6 +442,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "failed-investigation"
         out = root / "failed-investigation.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         self._frame_default(workspace)
         action = next_action(workspace)
         dispatch_result(workspace, self._payload("failed-investigation-1.json", {
@@ -438,7 +456,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         assembled = finish_audit(workspace)
         self.assertTrue(assembled["assembled"])
-        payload = json.loads(out.read_text())
+        payload = json.loads(out.with_suffix(".full.json").read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"unknown": 1})
         self.assertEqual(payload["unverified_requirements"][0]["reason"], "investigator_failed_to_submit")
 
@@ -491,9 +509,9 @@ class AuditRuntimeTests(unittest.TestCase):
         reqs = root / "many-batch-reqs.json"
         rows = []
         for index in range(80):
-            topic = "retry" if index % 2 == 0 else "handler"
+            topic = "schedule_retry" if index % 2 == 0 else "handle_error"
             rows.append({
-                "id": f"PACK-{index:03d}", "document": f"RFC {6000 + index}",
+                "id": f"PACK-{index:03d}", "document": "RFC 9999",
                 "section": f"{index}.1", "quote": f"The service MUST {topic}.",
                 "normalized": f"The service {topic}s.", "keywords": [topic],
             })
@@ -502,6 +520,34 @@ class AuditRuntimeTests(unittest.TestCase):
         init_audit(self.repo, reqs, workspace)
         batches = json.loads((workspace / "batches.json").read_text())["batches"]
         self.assertLessEqual(len(batches), 30)
+        self.assertLessEqual(max(len(batch["requirement_ids"]) for batch in batches), 12)
+
+    def test_batch_planner_does_not_force_merge_zero_affinity_topics(self):
+        root = Path(self.temp.name)
+        reqs = root / "unrelated-batch-reqs.json"
+        rows = [
+            {
+                "id": f"PACK-{index}", "document": f"DOC-{index}", "section": "1",
+                "quote": f"Requirement {index} MUST satisfy unique_{index}.",
+                "normalized": f"unique_{index}", "keywords": [f"unique_{index}"],
+            }
+            for index in range(35)
+        ]
+        reqs.write_text(json.dumps({"requirements": rows}), encoding="utf-8")
+        workspace = root / "unrelated-batches"
+        init_audit(self.repo, reqs, workspace)
+        batches = json.loads((workspace / "batches.json").read_text())["batches"]
+        self.assertGreater(len(batches), 30)
+        self.assertLessEqual(max(len(batch["requirement_ids"]) for batch in batches), 12)
+
+    def test_single_requirement_uses_batch_workflow(self):
+        root = Path(self.temp.name)
+        workspace = root / "single-batch"
+        out = root / "single-batch.json"
+        init_audit(self.repo, self.requirements, workspace, out)
+        action = next_action(workspace)
+        self.assertEqual(action["next_action"], "investigate_batch")
+        self.assertEqual(action["batch"]["requirement_ids"], ["REQ-1"])
 
     def test_code_affinity_groups_different_sections_by_locality(self):
         root = Path(self.temp.name)
@@ -546,7 +592,7 @@ class AuditRuntimeTests(unittest.TestCase):
         }))
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         finish_audit(workspace)
-        payload = json.loads(out.read_text())
+        payload = json.loads(out.with_suffix(".full.json").read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
         self.assertEqual(payload["unverified_requirements"][0]["requirement_id"], "PACK-B")
 
@@ -628,7 +674,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "batch-budget"
         init_audit(self.repo, reqs, workspace)
         action = next_action(workspace)
-        for index in range(6):
+        for index in range(MAX_BATCH_TEXT_QUERIES):
             code_query(workspace, action["batch_id"], "investigator", "concept", query=f"retry|schedule_retry|handle_error|{index}")
         with self.assertRaisesRegex(ValueError, "batch text query budget exceeded"):
             code_query(workspace, action["batch_id"], "investigator", "concept", query="one_more_text_query")
@@ -656,7 +702,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["rejected_results"][0]["requirement_id"], "PACK-B")
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         finish_audit(workspace)
-        payload = json.loads(out.read_text())
+        payload = json.loads(out.with_suffix(".full.json").read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"covered": 1, "unknown": 1})
 
     def test_partial_batch_result_outputs_issue(self):
@@ -685,9 +731,16 @@ class AuditRuntimeTests(unittest.TestCase):
         }))
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         finish_audit(workspace)
-        payload = json.loads(out.read_text())
+        payload = json.loads(out.with_suffix(".full.json").read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"partial": 1, "unknown": 1})
         self.assertEqual(payload["issues"][0]["requirement_id"], "PACK-A")
+        competition = json.loads(out.read_text())
+        self.assertEqual(set(competition.keys()), {"issues"})
+        self.assertEqual(
+            set(competition["issues"][0].keys()),
+            {"id", "title", "rfc_reference", "violation_level", "file", "line", "evidence"},
+        )
+        self.assertEqual(set(competition["issues"][0]["evidence"].keys()), {"code_snippet", "rfc_requirement"})
         self.assertTrue(out.with_suffix(".sarif").exists())
 
     def test_failed_review_can_continue(self):
@@ -695,6 +748,7 @@ class AuditRuntimeTests(unittest.TestCase):
         workspace = root / "failed-review"
         out = root / "failed-review.json"
         init_audit(self.repo, self.requirements, workspace, out)
+        self._disable_batch_mode(workspace)
         obligation_id = self._frame_default(workspace)
         query = code_query(workspace, "REQ-1", "investigator", "concept", query="schedule_retry")
         negative_query = code_query(workspace, "REQ-1", "investigator", "concept", query="alternate_retry")
@@ -716,7 +770,7 @@ class AuditRuntimeTests(unittest.TestCase):
         self.assertEqual(result["dispatch_status"], "failed_finalized")
         self.assertEqual(next_action(workspace)["next_action"], "finish")
         finish_audit(workspace)
-        payload = json.loads(out.read_text())
+        payload = json.loads(out.with_suffix(".full.json").read_text())
         self.assertEqual(payload["coverage_summary"]["status_counts"], {"unknown": 1})
         self.assertEqual(payload["unverified_requirements"][0]["reason"], "reviewer_failed_to_submit")
 
@@ -797,8 +851,8 @@ class AuditRuntimeTests(unittest.TestCase):
         assembled = assemble_result(self.workspace, out)
         self.assertTrue(assembled["assembled"])
         self.assertTrue(Path(assembled["sarif"]).exists())
-        self.assertEqual(json.loads(out.read_text())["coverage_summary"]["status_counts"], {"covered": 1})
-        self.assertTrue(validate_result(out)["valid"])
+        self.assertEqual(json.loads(out.with_suffix(".full.json").read_text())["coverage_summary"]["status_counts"], {"covered": 1})
+        self.assertTrue(validate_result(out.with_suffix(".full.json"))["valid"])
 
     def test_locked_requirements_cannot_be_modified(self):
         path = self.workspace / "requirements.json"
@@ -987,7 +1041,7 @@ class AuditRuntimeTests(unittest.TestCase):
             "reason": "The supplied packet supports the mismatch.", "unsupported_claims": [],
         }))
         finish_audit(workspace)
-        issue = json.loads(out.read_text())["issues"][0]
+        issue = json.loads(out.with_suffix(".full.json").read_text())["issues"][0]
         self.assertEqual(
             [item["clause_id"] for item in issue["spec_evidence_items"]],
             ["RFC9999:3:p0001", "RFC9999:3:p0002"],

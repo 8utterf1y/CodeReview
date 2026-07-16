@@ -1,0 +1,47 @@
+{
+  "components": [
+    {
+      "component_id": "C-00001",
+      "name": "dpdk/lib",
+      "file_count": 1,
+      "roles": {
+        "production": 1
+      },
+      "languages": {
+        "c": 1
+      },
+      "sample_files": [
+        "dpdk/lib/ip_frag/rte_ip_frag.h"
+      ]
+    },
+    {
+      "component_id": "C-00002",
+      "name": "freebsd/netinet6",
+      "file_count": 2,
+      "roles": {
+        "production": 2
+      },
+      "languages": {
+        "c": 2
+      },
+      "sample_files": [
+        "freebsd/netinet6/nd6.c",
+        "freebsd/netinet6/nd6_nbr.c"
+      ]
+    },
+    {
+      "component_id": "C-00003",
+      "name": "lib/ff_dpdk_if.c",
+      "file_count": 1,
+      "roles": {
+        "production": 1
+      },
+      "languages": {
+        "c": 1
+      },
+      "sample_files": [
+        "lib/ff_dpdk_if.c"
+      ]
+    }
+  ]
+}

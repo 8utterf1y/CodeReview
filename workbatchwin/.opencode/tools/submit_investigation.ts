@@ -54,19 +54,17 @@ export default tool({
       confidence: args.confidence,
     };
     const workspace = join(context.directory, ".specdiff", "audit");
-    return submit(workspace, "audit-submit-simple-investigation", payload);
+    return submit(workspace, "audit-submit-simple-investigation", payload, context.directory);
   },
 });
 
-async function submit(workspace: string, command: string, payload: object) {
+async function submit(workspace: string, command: string, payload: object, projectRoot: string) {
   const dir = join(workspace, ".submissions");
   await mkdir(dir, { recursive: true });
   const path = join(dir, `${randomUUID()}.json`);
-  await writeFile(path, JSON.stringify(payload), "utf8");
-  const homeDir = process.env.USERPROFILE;
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? join(homeDir, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
+  await writeFile(path, JSON.stringify(payload), "utf8");  const runtime = [join(projectRoot, ".opencode", "specdiff-runtime"), process.env.PYTHONPATH].filter(Boolean).join(";");
   try {
-    const { stdout } = await execFileAsync(pythonBin(), ["-m", "specdiff.tool_api", command, "--workspace", workspace, "--payload", path], { cwd: process.cwd(), env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
+    const { stdout } = await execFileAsync(pythonBin(), ["-m", "specdiff.tool_api", command, "--workspace", workspace, "--payload", path], { cwd: projectRoot, env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
     return stdout;
   } catch (error) {
     const err = error as Error & { stderr?: string; stdout?: string };

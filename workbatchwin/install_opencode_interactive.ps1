@@ -24,5 +24,5 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "SpecDiff batch-mode OpenCode artifacts installed."
-Write-Host "Run OpenCode from the target repository, then use:"
-Write-Host "  /spec-audit <docs-path> .specdiff/issues.json"
+Write-Host "Run OpenCode from the SpecDiff project, then use:"
+Write-Host "  /spec-audit <repo-path> <docs-path> <out-path>"

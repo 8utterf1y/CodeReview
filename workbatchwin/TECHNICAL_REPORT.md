@@ -74,8 +74,10 @@ Synthetic tests cover:
 - code search returns coverage context
 - heuristic calls are marked as heuristic/probable
 
-Run tests from the repository root:
+Run tests from the Windows `work` directory:
 
-```bash
-PYTHONPATH=work PYTHONPYCACHEPREFIX=/private/tmp/specdiff-pyc python3 -m unittest discover -s work/tests
+```powershell
+cd C:\judge-assets\01_03_ai_implementation_design_difference_detection\work
+$env:PYTHONPATH = "."
+python -m unittest discover -s tests
 ```

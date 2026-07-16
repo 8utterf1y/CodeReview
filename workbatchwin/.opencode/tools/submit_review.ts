@@ -21,13 +21,11 @@ export default tool({
     await mkdir(dir, { recursive: true });
     const path = join(dir, `${randomUUID()}.json`);
     await writeFile(path, JSON.stringify({ requirement_id: args.requirementId, verdict: args.verdict, reason: args.reason, unsupported_claims: args.unsupportedClaims }), "utf8");
-    return run(["audit-submit-simple-review", "--workspace", workspace, "--payload", path]);
+    return run(["audit-submit-simple-review", "--workspace", workspace, "--payload", path], context.directory);
   },
 });
 
-async function run(args: string[]) {
-  const homeDir = process.env.USERPROFILE;
-  const runtime = [process.env.SPECDIFF_RUNTIME, `${process.cwd()}/.opencode/specdiff-runtime`, homeDir ? join(homeDir, ".config", "opencode", "specdiff-runtime") : undefined, process.env.PYTHONPATH].filter(Boolean).join(";");
+async function run(args: string[], projectRoot: string) {  const runtime = [join(projectRoot, ".opencode", "specdiff-runtime"), process.env.PYTHONPATH].filter(Boolean).join(";");
   const { stdout } = await execFileAsync(pythonBin(), ["-m", "specdiff.tool_api", ...args], { env: { ...process.env, PYTHONPATH: runtime }, maxBuffer: 50 * 1024 * 1024 });
   return stdout;
 }

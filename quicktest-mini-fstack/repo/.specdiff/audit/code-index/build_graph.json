@@ -1,0 +1,8 @@
+{
+  "build_files": [],
+  "compile_commands": {
+    "available": false,
+    "path": null
+  },
+  "note": "V1 records build files and direct include/subdir statements; target/source edges require a later parser."
+}

@@ -1,0 +1,21 @@
+{
+  "backend": "aider_tree_sitter_pagerank",
+  "files": [
+    {
+      "path": "dpdk/lib/ip_frag/rte_ip_frag.h",
+      "rank": 0.0
+    },
+    {
+      "path": "freebsd/netinet6/nd6.c",
+      "rank": 0.0
+    },
+    {
+      "path": "freebsd/netinet6/nd6_nbr.c",
+      "rank": 0.0
+    },
+    {
+      "path": "lib/ff_dpdk_if.c",
+      "rank": 0.0
+    }
+  ]
+}

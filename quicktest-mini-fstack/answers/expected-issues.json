@@ -1,0 +1,96 @@
+{
+  "benchmark": "quicktest-mini-fstack",
+  "expected_issue_count": 6,
+  "issues": [
+    {
+      "id": "EXPECTED-001",
+      "requirement_id": "REQ-ND-OPTIONS",
+      "title": "ND option processing has an arbitrary 10-option cap",
+      "rfc_reference": "RFC 4861 Section 6.3.4 / 4.6.2",
+      "violation_level": "MUST",
+      "severity": "high",
+      "match_type": "code_weaker_than_spec",
+      "file": "freebsd/netinet6/nd6.c",
+      "lines": [123, 523],
+      "evidence": {
+        "code": "VNET_DEFINE_STATIC(int, nd6_maxndopt) = 10; and nd6_options stops when i > V_nd6_maxndopt.",
+        "spec": "Valid Neighbor Discovery options in Router Advertisements must be processed without an arbitrary small count limit."
+      }
+    },
+    {
+      "id": "EXPECTED-002",
+      "requirement_id": "REQ-PROXY-NA-RANDOM-DELAY",
+      "title": "Proxy Neighbor Advertisement random delay is explicitly not implemented",
+      "rfc_reference": "RFC 4861 Section 7.2.8",
+      "violation_level": "SHOULD",
+      "severity": "medium",
+      "match_type": "missing_in_code",
+      "file": "freebsd/netinet6/nd6_nbr.c",
+      "lines": [650, 967],
+      "evidence": {
+        "code": "Comments list the proxy advertisement delay rule as not implemented.",
+        "spec": "Proxy or anycast Neighbor Advertisements should use a bounded random response delay."
+      }
+    },
+    {
+      "id": "EXPECTED-003",
+      "requirement_id": "REQ-PROXY-UNSOLICITED-NA",
+      "title": "Proxy Neighbor Discovery lacks unsolicited Neighbor Advertisement support",
+      "rfc_reference": "RFC 4861 Section 7.2.6",
+      "violation_level": "MAY",
+      "severity": "low",
+      "match_type": "missing_in_code",
+      "file": "freebsd/netinet6/nd6_nbr.c",
+      "lines": [339, 349, 1068],
+      "evidence": {
+        "code": "Proxy NA is sent from solicitation-response paths; no proactive proxy-state unsolicited NA path is present.",
+        "spec": "Unsolicited Neighbor Advertisements may be sent to update neighbor caches."
+      }
+    },
+    {
+      "id": "EXPECTED-004",
+      "requirement_id": "REQ-IPV6-FRAGMENT-HEADER-CHAIN",
+      "title": "IPv6 fragment helper checks only the base header immediate protocol",
+      "rfc_reference": "RFC 8200 Section 4 / 4.5",
+      "violation_level": "MUST",
+      "severity": "high",
+      "match_type": "partial_match",
+      "file": "dpdk/lib/ip_frag/rte_ip_frag.h",
+      "lines": [142, 146],
+      "evidence": {
+        "code": "rte_ipv6_frag_get_ipv6_fragment_header returns a fragment header only when hdr->proto == IPPROTO_FRAGMENT.",
+        "spec": "IPv6 extension headers form a Next Header chain; fragment handling must account for preceding extension headers."
+      }
+    },
+    {
+      "id": "EXPECTED-005",
+      "requirement_id": "REQ-DHCPV6",
+      "title": "DHCPv6 implementation is absent from the reduced repository",
+      "rfc_reference": "RFC 8415",
+      "violation_level": "MUST",
+      "severity": "medium",
+      "match_type": "missing_in_code",
+      "file": null,
+      "lines": [],
+      "evidence": {
+        "code": "No DHCPv6 or DHCP6 client/server/relay/message-processing implementation is present in the reduced source tree.",
+        "spec": "RFC 8415 defines DHCPv6 support obligations for DHCPv6-capable IPv6 configuration."
+      }
+    },
+    {
+      "id": "EXPECTED-006",
+      "requirement_id": "REQ-MLD-DISPATCH",
+      "title": "MLD multicast receive path can be diverted before IPv6 stack handling",
+      "rfc_reference": "RFC 2710",
+      "violation_level": "MUST",
+      "severity": "high",
+      "match_type": "dispatch_or_routing",
+      "file": "lib/ff_dpdk_if.c",
+      "lines": [1573, 1801, 1803],
+      "evidence": {
+        "code": "KNI filtering and enqueue decisions can route packets away from ff_veth_input, the IPv6 stack input path.",
+        "spec": "MLD ICMPv6 multicast listener packets must reach IPv6/ICMPv6 MLD handling."
+      }
+    }
+  ]
+}

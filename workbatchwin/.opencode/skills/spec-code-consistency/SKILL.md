@@ -5,7 +5,7 @@ description: Audit design documents or RFC inventories against a repository with
 
 # Spec-Code Consistency
 
-Run `/spec-audit <docs-path> <out-path>` from the repository being audited.
+Run `/spec-audit <repo-path> <docs-path> <out-path>` from the SpecDiff OpenCode project.
 
 `docs-path` may be a canonical requirements JSON, an explicit-obligation design document, or an RFC inventory.
 For an RFC inventory, `/spec-audit` internally downloads or reuses cached RFC Editor text, creates an RFC corpus,

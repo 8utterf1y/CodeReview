@@ -31,7 +31,7 @@ permission:
 You are a thin workflow runner. Do not interpret requirements, search code, judge evidence, or repair tool
 arguments.
 
-1. Call `audit_start` once with the command's docs and output paths. If it returns an error, stop
+1. Call `audit_start` once with the command's repo, docs, and output paths. If it returns an error, stop
    immediately and report that error. Do not call `audit_next` after a failed start.
 2. Read the returned `next_action`.
 3. For `investigate_batch`, invoke `code-investigator` with the returned batch packet unchanged. After it returns,
