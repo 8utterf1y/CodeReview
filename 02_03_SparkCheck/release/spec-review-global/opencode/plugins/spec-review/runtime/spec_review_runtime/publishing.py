@@ -19,6 +19,7 @@ def publish_preview(connection: sqlite3.Connection, repo: Path, case_id: str) ->
     changed = _changed_right_lines(Path(scope["analysis_root"]), case["base_revision"], case["head_revision"])
     comments = _inline_comments(connection, case_id, report, changed)
     counts = report["result"]["verdict_counts"]
+    root_findings = report["result"].get("root_findings") or report["result"].get("findings") or []
     body = _review_body(report, len(comments))
     review_payload = {
         "commit_id": case["head_revision"],
@@ -43,6 +44,7 @@ def publish_preview(connection: sqlite3.Connection, repo: Path, case_id: str) ->
             "details_url": pull["html_url"],
         },
         "sarif_report": str(_report_dir(repo, case_id) / "review.sarif"),
+        "root_findings": len(root_findings),
         "writes_remote": False,
         "next_step": "确认预览后调用 spec_review_publish，并显式传入 expectedHeadSha。",
     }
@@ -288,6 +290,7 @@ def _comment_body(finding: dict) -> str:
 def _review_body(report: dict, inline_count: int) -> str:
     counts = report["result"]["verdict_counts"]
     coverage = report["coverage"]
+    root_count = len(report["result"].get("root_findings") or report["result"].get("findings") or [])
     return (
         "## 需求—代码一致性审查\n\n"
         f"案例：`{report['case_id']}`  \n"
@@ -295,6 +298,7 @@ def _review_body(report: dict, inline_count: int) -> str:
         f"覆盖率：{coverage['submitted']}/{coverage['expected']}  \n"
         f"结论：consistent={counts['consistent']}，inconsistent={counts['inconsistent']}，"
         f"uncertain={counts['uncertain']}，not_applicable={counts['not_applicable']}。  \n"
+        f"根因问题：{root_count} 个；不一致声明：{counts['inconsistent']} 条。  \n"
         f"已生成 {inline_count} 条可定位到本次 Diff 的行内评论。\n\n"
         "此结果由确定性审查状态机生成；无法定位到 Diff 新行的问题保留在审查摘要中。"
     )

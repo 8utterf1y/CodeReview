@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -97,11 +98,14 @@ def _assemble_final(connection, case_id: str, runs: dict) -> tuple[dict, dict]:
         if not missing else
         f"审查未完成：仅覆盖 {len(submitted_ids)}/{len(expected_ids)} 条需求，缺少 {len(missing)} 条。"
     )
+    findings = [item for item in claims if item["verdict"] == "inconsistent"]
+    root_findings = _root_findings(findings)
     return {
         "summary": summary,
         "verdict_counts": counts,
         "claims": claims,
-        "findings": [item for item in claims if item["verdict"] == "inconsistent"],
+        "findings": findings,
+        "root_findings": root_findings,
     }, coverage
 
 
@@ -114,11 +118,83 @@ def _items(result: dict, stage: str) -> list[dict]:
     return []
 
 
+def _root_findings(findings: list[dict]) -> list[dict]:
+    groups: dict[str, list[dict]] = {}
+    for item in findings:
+        groups.setdefault(_root_key(item), []).append(item)
+    roots = []
+    for index, items in enumerate(groups.values(), 1):
+        primary = _select_primary_finding(items)
+        claim_ids = [str(item.get("claim_id")) for item in items if item.get("claim_id")]
+        evidence_ids = []
+        for item in items:
+            evidence_ids.extend(item.get("evidence_ids") or item.get("evidence") or [])
+        unique_evidence = list(dict.fromkeys(str(value) for value in evidence_ids if value))
+        root = dict(primary)
+        root["root_id"] = primary.get("root_id") or f"ROOT-{index:03d}"
+        root["affected_claim_ids"] = claim_ids
+        root["affected_claim_count"] = len(claim_ids)
+        root["evidence_ids"] = unique_evidence[:10]
+        if len(items) > 1:
+            root["summary"] = _root_summary(items, primary)
+        roots.append(root)
+    return roots
+
+
+def _root_key(item: dict) -> str:
+    explicit = item.get("root_cause_id") or item.get("root_id") or item.get("issue_id")
+    if explicit:
+        return f"id:{explicit}"
+    text = " ".join(str(item.get(key) or "") for key in ("title", "reasoning", "reason", "summary", "description"))
+    normalized = text.casefold()
+    code_markers = [
+        r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)",
+        r"(claim_for_payment)",
+        r"(PaymentWorker\.process|PayoutWorker\.process)",
+        r"(CANCELLED\s*[-=]?>\s*PAYING)",
+    ]
+    markers = []
+    for pattern in code_markers:
+        markers.extend(match.group(1).casefold() for match in re.finditer(pattern, text))
+    if markers:
+        return "markers:" + "|".join(sorted(set(markers)))
+    tokens = re.findall(r"[a-z_][a-z0-9_]{2,}", normalized)
+    stop = {"claim", "evid", "consistent", "inconsistent", "critical", "introduced", "unattributed"}
+    meaningful = [token for token in tokens if token not in stop][:8]
+    return "text:" + "|".join(meaningful)
+
+
+def _select_primary_finding(items: list[dict]) -> dict:
+    return sorted(
+        items,
+        key=lambda item: (
+            _severity_rank(item.get("severity")),
+            -len(item.get("evidence_ids") or item.get("evidence") or []),
+            str(item.get("claim_id") or ""),
+        ),
+    )[0]
+
+
+def _severity_rank(value) -> int:
+    return {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(str(value or "").lower(), 5)
+
+
+def _root_summary(items: list[dict], primary: dict) -> str:
+    base = str(
+        primary.get("summary") or primary.get("reasoning") or primary.get("reason") or primary.get("description") or ""
+    ).strip()
+    suffix = f"（同一根因影响 {len(items)} 条需求声明，已在逐声明结果中保留覆盖明细。）"
+    return f"{base}{suffix}" if base else suffix
+
+
 def _markdown(payload: dict) -> str:
     result = payload["result"] if isinstance(payload["result"], dict) else {}
     findings = result.get("findings")
     if not isinstance(findings, list):
         findings = result.get("issues") or result.get("claims") or []
+    root_findings = result.get("root_findings")
+    if not isinstance(root_findings, list):
+        root_findings = findings
     lines = [
         "# 需求—代码一致性审查报告",
         "",
@@ -133,7 +209,7 @@ def _markdown(payload: dict) -> str:
         "",
         str(result.get("summary") or result.get("verdict") or "审查已完成，具体发现见下文。"),
         "",
-        "## 问题清单",
+        "## 根因问题清单",
         "",
     ]
     pull = payload["scope"].get("pull_request")
@@ -142,9 +218,9 @@ def _markdown(payload: dict) -> str:
             f"- GitHub PR：[{pull.get('owner')}/{pull.get('repo')}#{pull.get('number')}]({pull.get('html_url')})",
             f"- PR 分支：`{pull.get('base_ref')}` ← `{pull.get('head_ref')}`",
         ]
-    if not findings:
+    if not root_findings:
         lines.append("没有提交需要报告的问题。")
-    for index, item in enumerate(findings, 1):
+    for index, item in enumerate(root_findings, 1):
         if not isinstance(item, dict):
             continue
         title = item.get("title") or item.get("claim_id") or f"问题 {index}"
@@ -161,8 +237,23 @@ def _markdown(payload: dict) -> str:
         if evidence:
             lines.append("证据：" + ", ".join(f"`{value}`" for value in evidence))
             lines.append("")
+        affected = item.get("affected_claim_ids") or []
+        if affected:
+            lines.append("影响需求声明：" + ", ".join(f"`{value}`" for value in affected))
+            lines.append("")
         if isinstance(item.get("suggested_patch"), str) and item["suggested_patch"].strip():
             lines.extend(["建议 Patch（不会自动应用）：", "", "```diff", item["suggested_patch"].rstrip(), "```", ""])
+    if root_findings and len(findings) != len(root_findings):
+        lines.extend([
+            "## 逐声明不一致明细", "",
+            f"以下 {len(findings)} 条不一致声明已归并为 {len(root_findings)} 个根因问题。", "",
+        ])
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            lines.extend([
+                f"- `{item.get('claim_id')}`：{item.get('reasoning') or item.get('reason') or item.get('summary') or item.get('description') or ''}",
+            ])
     lines.extend([
         "## 审查范围", "", "```json",
         json.dumps(payload["scope"], ensure_ascii=False, indent=2), "```", "",

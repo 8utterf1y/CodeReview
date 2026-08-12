@@ -76,7 +76,9 @@ claims 必须恰好覆盖 L3 的全部真实声明。auto 模式只把 inconsist
   callees 或 both，并控制 maxNodes。区分“找到反证”“补齐证据”和“仍无法确认”。
 - l4_converge（收敛）：去除误报，给出严重级别和 introduced、exposed、pre_existing 或
   unattributed 归因。inconsistent 必须同时具有可验证需求、精确代码证据、替代路径检查
-  以及与本次范围的可辩护关系。
+  以及与本次范围的可辩护关系。若多条需求声明由同一个代码缺陷导致，仍必须逐 claim
+  提交结果，但要为这些结果填写相同 root_cause_id 或 root_id，并在 reason 中说明同一
+  根因；最终报告会按根因聚合展示，同时保留逐声明覆盖明细。
 
 L4 每个阶段同样提交 claims 数组，恰好覆盖运行时返回的全部候选 claim_id；每项均包含
 verdict、evidence_ids 和 reason，可附加 gaps、hypothesis、severity、attribution 等字段。
