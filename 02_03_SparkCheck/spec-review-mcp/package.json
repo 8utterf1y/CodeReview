@@ -1,0 +1,33 @@
+{
+  "name": "@company/spec-review-mcp",
+  "version": "0.1.0",
+  "description": "代码—设计文档一致性审查 MCP 工具服务副本",
+  "type": "module",
+  "exports": "./index.ts",
+  "main": "./index.ts",
+  "files": [
+    "index.ts",
+    "src",
+    "node_modules/@opencode-ai/plugin",
+    "node_modules/zod",
+    "runtime",
+    "README.md",
+    "DESIGN.md"
+  ],
+  "scripts": {
+    "test:runtime": "python3 -m unittest discover -s runtime/tests -v",
+    "mcp": "python3 runtime/spec_review_mcp_server.py"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.16",
+    "zod": "4.1.8"
+  },
+  "engines": {
+    "opencode": ">=1.18.0",
+    "python": ">=3.9"
+  },
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

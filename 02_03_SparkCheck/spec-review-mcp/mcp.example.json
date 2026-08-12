@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "spec-review": {
+      "command": "python3",
+      "args": [
+        "/ABSOLUTE/PATH/TO/spec-review-mcp/runtime/spec_review_mcp_server.py"
+      ]
+    }
+  }
+}
