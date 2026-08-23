@@ -1,102 +1,68 @@
-# SpecDiff Work 目录运行说明
+# SpecDiff Work 目录说明
 
-本目录是作品实际运行目录。平台或评测 Agent 应在本目录启动 OpenCode。
+## 1. 作品概述
 
-## 必需环境
+本目录是 SpecDiff 的可运行交付件目录，包含 OpenCode 命令、Agent、工具、Skill 和 Python runtime。评测或使用时从本目录启动 OpenCode，并通过 `/spec-audit` 传入待审计代码目录、规范文档和输出路径。
 
-```text
-Python 3.9+
-OpenCode
-```
+## 2. 输入
 
-Windows 下 Python 命令使用：
+| 输入项 | 说明 |
+|--------|------|
+| 待审计代码目录 | 要检查的代码仓库或项目目录 |
+| 规范/设计文档 | Markdown、requirements JSON 或 RFC 清单 |
+| 输出文件路径 | `issues.json` 的生成位置 |
 
-```text
-python
-```
+## 3. 执行工作流
 
-## 快速自检
-
-```bash
-python self_check.py
-```
-
-成功输出：
-
-```text
-self-check passed: required files present and runtime imports
-```
-
-## 审计命令
-
-在本目录启动 OpenCode：
+### Step 1：启动 OpenCode
 
 ```bash
 opencode
 ```
 
-然后执行：
+预期状态：
 
 ```text
-/spec-audit <repo> <docs> <out>
+OpenCode 加载 .opencode/ 下的 spec-audit 命令和工具
 ```
 
-参数：
+### Step 2：运行审计
 
 ```text
-repo = 被审计代码仓目录
-docs = 设计文档、需求 JSON 或 RFC inventory/benchmark.md
-out  = 输出 issues.json 路径
+/spec-audit <待审计代码目录> <规范或设计文档路径> <输出issues.json路径>
 ```
 
-示例：
+该命令会依次执行：
 
 ```text
-/spec-audit C:\judge-assets\01_03_ai_implementation_design_difference_detection\code\f-stack C:\judge-assets\01_03_ai_implementation_design_difference_detection\Difference\benchmark.md C:\judge-assets\01_03_ai_implementation_design_difference_detection\code\f-stack\.specdiff\issues.json
+audit_start
+audit_next
+Code Investigator 调查 Batch
+submit_batch_results
+audit_finish
 ```
 
-## 执行约束
+运行时生成的中间状态保存在待审计代码目录的 `.specdiff/audit/` 下。
+
+### Step 3：读取输出
+
+主输出为命令传入的 `issues.json` 路径，同时会在待审计代码目录下生成：
 
 ```text
-1. 不要从被审计代码仓目录启动 OpenCode；
-2. 必须从本 work 目录启动；
-3. 被审计代码仓通过 /spec-audit 的 repo 参数传入；
-4. 不需要手动设置 PYTHONPATH，OpenCode tool 会自动定位 .opencode/specdiff-runtime；
-5. 不需要安装 rg、CodeQL、Joern、Semgrep 或向量数据库。
+.specdiff/issues.sarif
+.specdiff/audit/
 ```
 
-## 输出
+## 4. 产物清单
 
-主输出：
+| 产物 | 位置 | 格式 | 用途 |
+|------|------|------|------|
+| OpenCode 命令 | `.opencode/commands/spec-audit.md` | Markdown | 提供 `/spec-audit` 入口 |
+| Orchestrator Agent | `.opencode/agents/spec-compliance-orchestrator.md` | Markdown | 编排审计流程 |
+| Investigator Agent | `.opencode/agents/code-investigator.md` | Markdown | 调查代码证据并提交 Batch 结果 |
+| OpenCode 工具 | `.opencode/tools/` | TypeScript | 调用 runtime API |
+| SpecDiff runtime | `specdiff/` | Python 包 | 执行解析、索引、规划、状态管理和报告生成 |
+| Skill | `skills/spec-code-consistency/SKILL.md` | Markdown | 描述审计方法和证据规则 |
+| 主报告 | `<输出issues.json路径>` | JSON | 不一致问题列表 |
+| 审计过程 | `<待审计代码目录>/.specdiff/audit/` | JSON/JSONL/SQLite | 查询、证据、Batch 和代码索引 |
 
-```text
-<out>
-```
-
-格式：
-
-```json
-{
-  "issues": [
-    {
-      "id": "ISSUE-001",
-      "title": "问题标题",
-      "rfc_reference": "RFC 4861 §7.2.8",
-      "violation_level": "SHOULD",
-      "file": "freebsd/netinet6/nd6_nbr.c",
-      "line": 650,
-      "evidence": {
-        "code_snippet": "代码证据摘录",
-        "rfc_requirement": "规范要求摘录"
-      }
-    }
-  ]
-}
-```
-
-附加输出：
-
-```text
-<repo>/.specdiff/issues.sarif
-<repo>/.specdiff/audit/
-```

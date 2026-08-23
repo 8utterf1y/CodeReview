@@ -101,6 +101,43 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(finished["status"], "completed")
         self.assertTrue(Path(finished["markdown_report"]).exists())
 
+    def test_report_groups_multiple_claims_by_root_cause(self):
+        (self.repo / "two.md").write_text(
+            "# 功能\n\n- 服务必须交付所有已经接受并完成校验的值。\n- 服务必须记录每次交付行为。\n",
+            encoding="utf-8",
+        )
+        with connect(self.repo) as connection:
+            started = start_case(connection, self.repo, {
+                "docs": ["two.md"], "paths": ["service.py"], "mode": "fast",
+            })
+            packet = build_context_packs(connection, self.repo, started["case_id"], None, "both", 10)
+            claims = []
+            for pack in packet["packs"]:
+                evidence_id = next(item["evidence_id"] for item in pack["evidence"] if item["kind"] == "source")
+                claims.append({
+                    "claim_id": pack["claim"]["claim_id"],
+                    "verdict": "inconsistent",
+                    "severity": "critical",
+                    "attribution": "introduced",
+                    "root_cause_id": "ROOT-MISSING-DELIVERY-GUARD",
+                    "evidence_ids": [evidence_id],
+                    "reason": "process 绕过同一处交付保护逻辑。",
+                })
+            submit_stage(connection, started["case_id"], "l3_review", json.dumps({"claims": claims}))
+            advance(connection, started["case_id"])
+            finished = finish_case(connection, self.repo, started["case_id"])
+            payload = json.loads(Path(finished["json_report"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["coverage"]["submitted"], 2)
+        self.assertEqual(payload["result"]["verdict_counts"]["inconsistent"], 2)
+        self.assertEqual(len(payload["result"]["findings"]), 2)
+        self.assertEqual(len(payload["result"]["root_findings"]), 1)
+        self.assertEqual(payload["result"]["root_findings"][0]["affected_claim_count"], 2)
+        self.assertIn("## 未完成或不一致项", finished["report"])
+        self.assertIn("影响范围：2 条需求声明", finished["report"])
+        self.assertIn("逐条覆盖结果、证据 ID", finished["report"])
+        self.assertNotIn("逐声明不一致明细", finished["report"])
+        self.assertNotIn("## 审查范围", finished["report"])
+
     def test_auto_case_escalates_uncertain_result(self):
         with connect(self.repo) as connection:
             started = start_case(connection, self.repo, {
